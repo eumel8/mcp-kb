@@ -409,17 +409,20 @@ func (m *Middleware) TokenHandler() http.HandlerFunc {
 // RegisterHandler implements a stub RFC 7591 Dynamic Client Registration
 // endpoint.  Rather than creating a new Keycloak client (which requires admin
 // privileges and is blocked by Keycloak's Trusted Hosts policy), it always
-// returns the pre-configured client_id.  This satisfies MCP clients that
-// require a registration_endpoint while keeping Keycloak client management
-// fully under operator control.
+// returns the pre-configured client_id.  Client metadata sent by the MCP
+// client (redirect_uris, grant_types, etc.) is echoed back in the response so
+// the client's schema validation passes.
 func (m *Middleware) RegisterHandler() http.HandlerFunc {
-	// RFC 7591 §3.2.1 successful response body (subset).
-	type registrationResponse struct {
-		ClientID                string   `json:"client_id"`
-		ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
+	// registrationRequest holds the RFC 7591 §2 client metadata sent by the
+	// MCP client.  We only need to read and echo back the fields the client
+	// validates; unknown fields are captured by the raw map.
+	type registrationRequest struct {
+		RedirectURIs            []string `json:"redirect_uris"`
 		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
 		GrantTypes              []string `json:"grant_types"`
 		ResponseTypes           []string `json:"response_types"`
+		ClientName              string   `json:"client_name,omitempty"`
+		Scope                   string   `json:"scope,omitempty"`
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -427,16 +430,49 @@ func (m *Middleware) RegisterHandler() http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		// Drain and discard the request body – we don't use it.
-		_, _ = io.Copy(io.Discard, r.Body)
+
+		// Parse the client metadata from the request body.
+		var req registrationRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Warn("register: could not parse request body", "err", err)
+			// Still proceed – we'll return sensible defaults below.
+		}
+
+		// Apply defaults for any missing fields.
+		if len(req.GrantTypes) == 0 {
+			req.GrantTypes = []string{"authorization_code", "refresh_token"}
+		}
+		if len(req.ResponseTypes) == 0 {
+			req.ResponseTypes = []string{"code"}
+		}
+		if req.TokenEndpointAuthMethod == "" {
+			req.TokenEndpointAuthMethod = "none" // public client – PKCE only
+		}
+
+		// RFC 7591 §3.2.1 successful response: echo back the client metadata
+		// plus the server-assigned client_id.
+		type registrationResponse struct {
+			ClientID                string   `json:"client_id"`
+			ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
+			RedirectURIs            []string `json:"redirect_uris"`
+			TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+			GrantTypes              []string `json:"grant_types"`
+			ResponseTypes           []string `json:"response_types"`
+			ClientName              string   `json:"client_name,omitempty"`
+			Scope                   string   `json:"scope,omitempty"`
+		}
 
 		resp := registrationResponse{
 			ClientID:                m.cfg.ClientID,
-			ClientIDIssuedAt:        0,      // 0 = unknown issuance time per RFC 7591
-			TokenEndpointAuthMethod: "none", // public client – PKCE only
-			GrantTypes:              []string{"authorization_code", "refresh_token"},
-			ResponseTypes:           []string{"code"},
+			ClientIDIssuedAt:        0, // 0 = unknown issuance time per RFC 7591
+			RedirectURIs:            req.RedirectURIs,
+			TokenEndpointAuthMethod: req.TokenEndpointAuthMethod,
+			GrantTypes:              req.GrantTypes,
+			ResponseTypes:           req.ResponseTypes,
+			ClientName:              req.ClientName,
+			Scope:                   req.Scope,
 		}
+
 		body, _ := json.Marshal(resp)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusCreated)
