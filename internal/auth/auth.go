@@ -1,29 +1,27 @@
-// Package auth provides HTTP middleware for protecting the MCP SSE endpoint
-// with Keycloak (or any OIDC-compliant provider) using the Authorization Code
-// flow, plus a fallback path for programmatic clients that supply an
-// Authorization: Bearer <token> header validated via RFC 7662 token
-// introspection.
+// Package auth provides HTTP middleware and OAuth 2.0 / OIDC endpoints for
+// protecting the MCP SSE endpoint via Keycloak.
 //
-// # Browser / interactive flow
+// # MCP Authorization Code flow (RFC 8414 + OAuth 2.1)
 //
-//  1. A request arrives without an "mcp_session" cookie and without a Bearer
-//     token header.
-//  2. The middleware stores the original URL in a "mcp_redirect" cookie and
-//     redirects the browser to the Keycloak authorization endpoint.
-//  3. Keycloak authenticates the user and redirects back to
-//     <ExternalBaseURL>/callback?code=…&state=…
-//  4. The /callback handler exchanges the code for tokens, validates the ID
-//     token, and stores the access token in an AES-GCM-encrypted HTTP-only
-//     "mcp_session" cookie.
-//  5. The user is redirected to the original URL (or / if not set).
-//  6. Subsequent requests carry the cookie; the middleware decrypts the token
-//     and validates it via RFC 7662 introspection (with a 30 s cache).
+// The MCP spec requires the server to expose OAuth 2.0 Authorization Server
+// Metadata (RFC 8414) at /.well-known/oauth-authorization-server.  When an
+// unauthenticated MCP client receives a 401, it fetches that document to
+// discover where to send the user for login.
 //
-// # Programmatic / API flow
+// Endpoints exposed (all outside the auth middleware):
 //
-// If a request carries Authorization: Bearer <token>, the middleware validates
-// it via introspection and, if active, forwards the request.  No redirect is
-// issued.
+//	/.well-known/oauth-authorization-server  RFC 8414 metadata (points to Keycloak)
+//	/authorize                               proxies/redirects to Keycloak /authorize
+//	/token                                   reverse-proxies to Keycloak /token
+//	/register                                reverse-proxies to Keycloak /register
+//	/callback                                OIDC callback for browser/cookie sessions
+//
+// # Auth middleware (Wrap)
+//
+//  1. Bearer token present → validate via RFC 7662 introspection, forward or 401.
+//  2. Session cookie present → decrypt, validate via introspection, forward or re-login.
+//  3. No credentials, API client (SSE / JSON) → 401 JSON OAuth error.
+//  4. No credentials, browser → redirect to Keycloak via /authorize.
 package auth
 
 import (
@@ -281,6 +279,179 @@ func (m *Middleware) CallbackHandler() http.HandlerFunc {
 		}
 		http.Redirect(w, r, target, http.StatusFound)
 	}
+}
+
+// ─── RFC 8414 metadata + OAuth proxy endpoints ────────────────────────────────
+
+// keycloakClaims holds the subset of Keycloak's OIDC discovery document that
+// we need to build the RFC 8414 metadata response and to proxy requests.
+type keycloakClaims struct {
+	AuthorizationEndpoint             string   `json:"authorization_endpoint"`
+	TokenEndpoint                     string   `json:"token_endpoint"`
+	RegistrationEndpoint              string   `json:"registration_endpoint"`
+	IntrospectionEndpoint             string   `json:"introspection_endpoint"`
+	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+	GrantTypesSupported               []string `json:"grant_types_supported"`
+	ResponseTypesSupported            []string `json:"response_types_supported"`
+	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
+}
+
+// MetadataHandler returns an http.HandlerFunc that serves the OAuth 2.0
+// Authorization Server Metadata document (RFC 8414) at
+// /.well-known/oauth-authorization-server.
+//
+// The MCP client fetches this after receiving a 401 to discover where to send
+// the user for authorization.  We advertise our own /authorize, /token, and
+// /register endpoints (which proxy to Keycloak) so the client's redirect_uri
+// points back to this service.
+func (m *Middleware) MetadataHandler() http.HandlerFunc {
+	// Build the document once at construction time from the discovered provider.
+	var kc keycloakClaims
+	_ = m.provider.Claims(&kc) // best-effort; fields stay zero if unavailable
+
+	base := strings.TrimRight(m.cfg.ExternalBaseURL, "/")
+
+	type metadata struct {
+		Issuer                            string   `json:"issuer"`
+		AuthorizationEndpoint             string   `json:"authorization_endpoint"`
+		TokenEndpoint                     string   `json:"token_endpoint"`
+		RegistrationEndpoint              string   `json:"registration_endpoint,omitempty"`
+		IntrospectionEndpoint             string   `json:"introspection_endpoint,omitempty"`
+		ResponseTypesSupported            []string `json:"response_types_supported"`
+		GrantTypesSupported               []string `json:"grant_types_supported"`
+		TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+		CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
+	}
+
+	grantTypes := kc.GrantTypesSupported
+	if len(grantTypes) == 0 {
+		grantTypes = []string{"authorization_code", "refresh_token"}
+	}
+	responseTypes := kc.ResponseTypesSupported
+	if len(responseTypes) == 0 {
+		responseTypes = []string{"code"}
+	}
+	authMethods := kc.TokenEndpointAuthMethodsSupported
+	if len(authMethods) == 0 {
+		authMethods = []string{"client_secret_basic", "client_secret_post", "none"}
+	}
+	ccMethods := kc.CodeChallengeMethodsSupported
+	if len(ccMethods) == 0 {
+		ccMethods = []string{"S256"}
+	}
+
+	doc := metadata{
+		Issuer:                            base,
+		AuthorizationEndpoint:             base + "/authorize",
+		TokenEndpoint:                     base + "/token",
+		ResponseTypesSupported:            responseTypes,
+		GrantTypesSupported:               grantTypes,
+		TokenEndpointAuthMethodsSupported: authMethods,
+		CodeChallengeMethodsSupported:     ccMethods,
+	}
+	if kc.RegistrationEndpoint != "" {
+		doc.RegistrationEndpoint = base + "/register"
+	}
+	if kc.IntrospectionEndpoint != "" {
+		doc.IntrospectionEndpoint = kc.IntrospectionEndpoint
+	}
+
+	body, _ := json.Marshal(doc)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+	}
+}
+
+// AuthorizeHandler proxies the OAuth 2.0 authorization request to Keycloak by
+// redirecting the user-agent.  The MCP client opens a browser to our /authorize
+// with its own redirect_uri; we forward all query parameters unchanged to
+// Keycloak's authorization_endpoint.
+func (m *Middleware) AuthorizeHandler() http.HandlerFunc {
+	var kc keycloakClaims
+	_ = m.provider.Claims(&kc)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if kc.AuthorizationEndpoint == "" {
+			http.Error(w, "authorization endpoint not available", http.StatusBadGateway)
+			return
+		}
+		// Forward all query parameters as-is to Keycloak.
+		target := kc.AuthorizationEndpoint + "?" + r.URL.RawQuery
+		http.Redirect(w, r, target, http.StatusFound)
+	}
+}
+
+// TokenHandler reverse-proxies the OAuth 2.0 token request to Keycloak.
+// The MCP client POSTs to our /token; we forward the body to Keycloak's
+// token_endpoint and stream the response back.
+func (m *Middleware) TokenHandler() http.HandlerFunc {
+	var kc keycloakClaims
+	_ = m.provider.Claims(&kc)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if kc.TokenEndpoint == "" {
+			http.Error(w, "token endpoint not available", http.StatusBadGateway)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		m.proxyToKeycloak(w, r, kc.TokenEndpoint)
+	}
+}
+
+// RegisterHandler reverse-proxies Dynamic Client Registration (RFC 7591) to
+// Keycloak.  Returns 404 if Keycloak does not expose a registration endpoint.
+func (m *Middleware) RegisterHandler() http.HandlerFunc {
+	var kc keycloakClaims
+	_ = m.provider.Claims(&kc)
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		if kc.RegistrationEndpoint == "" {
+			http.NotFound(w, r)
+			return
+		}
+		m.proxyToKeycloak(w, r, kc.RegistrationEndpoint)
+	}
+}
+
+// proxyToKeycloak forwards the incoming request body and selected headers to
+// targetURL and copies the response back to w.
+func (m *Middleware) proxyToKeycloak(w http.ResponseWriter, r *http.Request, targetURL string) {
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	if err != nil {
+		slog.Error("proxy: build request", "err", err)
+		http.Error(w, "proxy error", http.StatusBadGateway)
+		return
+	}
+	// Forward content-type and authorization headers from the client.
+	for _, h := range []string{"Content-Type", "Authorization", "Accept"} {
+		if v := r.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		slog.Error("proxy: upstream request", "err", err)
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers and status.
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // ─── login redirect ──────────────────────────────────────────────────────────

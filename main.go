@@ -129,7 +129,15 @@ func run() error {
 				return fmt.Errorf("create auth middleware: %w", err)
 			}
 
+			// OAuth 2.0 / OIDC endpoints – all outside the auth middleware so
+			// unauthenticated MCP clients can discover and use them.
+			mux.Handle("/.well-known/oauth-authorization-server", authMiddleware.MetadataHandler())
+			mux.Handle("/authorize", authMiddleware.AuthorizeHandler())
+			mux.Handle("/token", authMiddleware.TokenHandler())
+			mux.Handle("/register", authMiddleware.RegisterHandler())
 			mux.Handle("/callback", authMiddleware.CallbackHandler())
+
+			// Everything else requires a valid token or session cookie.
 			mux.Handle("/", authMiddleware.Wrap(sseServer))
 			handler = mux
 
