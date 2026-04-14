@@ -348,9 +348,10 @@ func (m *Middleware) MetadataHandler() http.HandlerFunc {
 		GrantTypesSupported:               grantTypes,
 		TokenEndpointAuthMethodsSupported: authMethods,
 		CodeChallengeMethodsSupported:     ccMethods,
-	}
-	if kc.RegistrationEndpoint != "" {
-		doc.RegistrationEndpoint = base + "/register"
+		// registration_endpoint is intentionally omitted: Keycloak's client
+		// registration is admin-controlled and rejects requests from unknown
+		// hosts.  MCP clients will fall back to prompting the user for a
+		// pre-registered client_id instead.
 	}
 	if kc.IntrospectionEndpoint != "" {
 		doc.IntrospectionEndpoint = kc.IntrospectionEndpoint
@@ -405,18 +406,15 @@ func (m *Middleware) TokenHandler() http.HandlerFunc {
 	}
 }
 
-// RegisterHandler reverse-proxies Dynamic Client Registration (RFC 7591) to
-// Keycloak.  Returns 404 if Keycloak does not expose a registration endpoint.
+// RegisterHandler always returns 404 to signal that dynamic client
+// registration (RFC 7591) is not supported.  Keycloak's registration endpoint
+// is admin-controlled and rejects requests from untrusted hosts; advertising
+// it would cause MCP clients to receive a "Trusted Hosts" rejection from
+// Keycloak.  Without a registration_endpoint in the metadata document MCP
+// clients fall back to prompting the user for a pre-registered client_id.
 func (m *Middleware) RegisterHandler() http.HandlerFunc {
-	var kc keycloakClaims
-	_ = m.provider.Claims(&kc)
-
 	return func(w http.ResponseWriter, r *http.Request) {
-		if kc.RegistrationEndpoint == "" {
-			http.NotFound(w, r)
-			return
-		}
-		m.proxyToKeycloak(w, r, kc.RegistrationEndpoint)
+		http.NotFound(w, r)
 	}
 }
 
