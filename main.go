@@ -196,7 +196,7 @@ func configFromEnv() (serverConfig, error) {
 
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		slog.Warn("OPENAI_API_KEY not set – embedding features (kb_search_incidents, kb_store_incident) will be unavailable")
+		slog.Info("OPENAI_API_KEY not set – vector search unavailable; kb_search_incidents will use full-text fallback, kb_store_incident will work without embedding")
 	}
 
 	var cookieKey []byte

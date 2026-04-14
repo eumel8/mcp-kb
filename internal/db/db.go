@@ -69,8 +69,11 @@ type SimilarIncident struct {
 	Similarity float64 `json:"similarity"`
 }
 
-// StoreIncident inserts (or upserts on casm_ticket_id) an incident and its
-// embedding vector in a single transaction.
+// StoreIncident inserts (or upserts on casm_ticket_id) an incident and
+// optionally its embedding vector in a single transaction.
+// If emb is nil the incident is stored without an embedding row; it can be
+// retrieved by kb_get_incident and found by text search but not by vector
+// similarity search.
 func StoreIncident(ctx context.Context, pool *pgxpool.Pool, inc Incident, emb []float32) (string, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -115,15 +118,18 @@ func StoreIncident(ctx context.Context, pool *pgxpool.Pool, inc Incident, emb []
 		return "", fmt.Errorf("upsert incident: %w", err)
 	}
 
-	_, err = tx.Exec(ctx, `
-		INSERT INTO incident_embeddings (incident_id, model, embedding)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (incident_id, model)
-		DO UPDATE SET embedding = EXCLUDED.embedding, created_at = NOW()`,
-		id, "text-embedding-3-small", pgvector.NewVector(emb),
-	)
-	if err != nil {
-		return "", fmt.Errorf("upsert embedding: %w", err)
+	// Only store the embedding row when an embedding was generated.
+	if emb != nil {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO incident_embeddings (incident_id, model, embedding)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (incident_id, model)
+			DO UPDATE SET embedding = EXCLUDED.embedding, created_at = NOW()`,
+			id, "text-embedding-3-small", pgvector.NewVector(emb),
+		)
+		if err != nil {
+			return "", fmt.Errorf("upsert embedding: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -228,6 +234,91 @@ type SearchFilters struct {
 	Environment       string
 	AffectedComponent string
 	Tags              []string
+}
+
+// SearchIncidentsText performs a full-text ILIKE search over title, description,
+// root_cause and resolution.  Used as a fallback when no embedding client is
+// available.  Returns results ordered by recency (newest first).
+func SearchIncidentsText(ctx context.Context, pool *pgxpool.Pool, query string, topK int, filters SearchFilters) ([]Incident, error) {
+	if topK <= 0 {
+		topK = 5
+	}
+
+	conditions := []string{}
+	args := []any{}
+	argN := 1
+
+	if query != "" {
+		conditions = append(conditions, fmt.Sprintf(
+			"(title ILIKE $%d OR description ILIKE $%d OR root_cause ILIKE $%d OR resolution ILIKE $%d)",
+			argN, argN, argN, argN))
+		args = append(args, "%"+query+"%")
+		argN++
+	}
+	if filters.Severity != "" {
+		conditions = append(conditions, fmt.Sprintf("severity = $%d", argN))
+		args = append(args, filters.Severity)
+		argN++
+	}
+	if filters.Environment != "" {
+		conditions = append(conditions, fmt.Sprintf("environment = $%d", argN))
+		args = append(args, filters.Environment)
+		argN++
+	}
+	if filters.AffectedComponent != "" {
+		conditions = append(conditions, fmt.Sprintf("affected_component ILIKE $%d", argN))
+		args = append(args, "%"+filters.AffectedComponent+"%")
+		argN++
+	}
+	if len(filters.Tags) > 0 {
+		conditions = append(conditions, fmt.Sprintf("tags && $%d", argN))
+		args = append(args, filters.Tags)
+		argN++
+	}
+
+	where := "1=1"
+	if len(conditions) > 0 {
+		where = ""
+		for i, c := range conditions {
+			if i > 0 {
+				where += " AND "
+			}
+			where += c
+		}
+	}
+
+	sql := fmt.Sprintf(`
+		SELECT id, title, description, affected_component, severity, environment,
+		       COALESCE(root_cause,''), resolution, COALESCE(runbook_url,''), tags,
+		       COALESCE(casm_ticket_id,''), COALESCE(alert_name,''),
+		       COALESCE(reported_by,''), COALESCE(resolved_by,''),
+		       occurred_at, resolved_at, created_at, updated_at
+		FROM incidents
+		WHERE %s
+		ORDER BY created_at DESC
+		LIMIT $%d`, where, argN)
+	args = append(args, topK)
+
+	rows, err := pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("text search query: %w", err)
+	}
+	defer rows.Close()
+
+	var results []Incident
+	for rows.Next() {
+		var inc Incident
+		if err := rows.Scan(
+			&inc.ID, &inc.Title, &inc.Description, &inc.AffectedComponent, &inc.Severity,
+			&inc.Environment, &inc.RootCause, &inc.Resolution, &inc.RunbookURL, &inc.Tags,
+			&inc.CASMTicketID, &inc.AlertName, &inc.ReportedBy, &inc.ResolvedBy,
+			&inc.OccurredAt, &inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		results = append(results, inc)
+	}
+	return results, rows.Err()
 }
 
 func nullStr(s string) *string {

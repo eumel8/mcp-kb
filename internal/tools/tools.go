@@ -47,9 +47,6 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool, embedClien
 	)
 
 	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if embedClient == nil {
-			return mcp.NewToolResultError("embedding is not configured (OPENAI_API_KEY is not set)"), nil
-		}
 		query := mcp.ParseString(req, "query", "")
 		if query == "" {
 			return mcp.NewToolResultError("query is required"), nil
@@ -71,20 +68,31 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool, embedClien
 			}
 		}
 
-		emb, err := embedClient.Embed(ctx, query)
-		if err != nil {
-			return mcp.NewToolResultError("generate query embedding: " + err.Error()), nil
+		// Use vector similarity search when an embedding client is available,
+		// otherwise fall back to full-text ILIKE search.
+		if embedClient != nil {
+			emb, err := embedClient.Embed(ctx, query)
+			if err != nil {
+				return mcp.NewToolResultError("generate query embedding: " + err.Error()), nil
+			}
+			results, err := db.SearchIncidents(ctx, pool, emb, topK, filters)
+			if err != nil {
+				return mcp.NewToolResultError("search incidents: " + err.Error()), nil
+			}
+			if len(results) == 0 {
+				return mcp.NewToolResultText("No similar incidents found in the knowledge base."), nil
+			}
+			return jsonResult(results)
 		}
 
-		results, err := db.SearchIncidents(ctx, pool, emb, topK, filters)
+		// Fallback: full-text search (no embedding required).
+		results, err := db.SearchIncidentsText(ctx, pool, query, topK, filters)
 		if err != nil {
 			return mcp.NewToolResultError("search incidents: " + err.Error()), nil
 		}
-
 		if len(results) == 0 {
-			return mcp.NewToolResultText("No similar incidents found in the knowledge base."), nil
+			return mcp.NewToolResultText("No matching incidents found in the knowledge base."), nil
 		}
-
 		return jsonResult(results)
 	})
 }
@@ -134,9 +142,6 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 	)
 
 	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		if embedClient == nil {
-			return mcp.NewToolResultError("embedding is not configured (OPENAI_API_KEY is not set)"), nil
-		}
 		title := mcp.ParseString(req, "title", "")
 		description := mcp.ParseString(req, "description", "")
 		component := mcp.ParseString(req, "affected_component", "")
@@ -198,12 +203,16 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 			inc.ResolvedAt = &now
 		}
 
-		// Generate embedding from combined incident text
-		embText := embedding.BuildIncidentText(
-			inc.Title, inc.Description, inc.RootCause, inc.Resolution, inc.Tags)
-		emb, err := embedClient.Embed(ctx, embText)
-		if err != nil {
-			return mcp.NewToolResultError("generate embedding: " + err.Error()), nil
+		// Generate embedding when client is available; store without one otherwise.
+		var emb []float32
+		if embedClient != nil {
+			embText := embedding.BuildIncidentText(
+				inc.Title, inc.Description, inc.RootCause, inc.Resolution, inc.Tags)
+			var err error
+			emb, err = embedClient.Embed(ctx, embText)
+			if err != nil {
+				return mcp.NewToolResultError("generate embedding: " + err.Error()), nil
+			}
 		}
 
 		id, err := db.StoreIncident(ctx, pool, inc, emb)
@@ -211,9 +220,13 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 			return mcp.NewToolResultError("store incident: " + err.Error()), nil
 		}
 
+		msg := fmt.Sprintf("Incident stored successfully with ID %s", id)
+		if emb == nil {
+			msg += " (no embedding — vector search unavailable for this entry)"
+		}
 		return jsonResult(map[string]string{
 			"id":      id,
-			"message": fmt.Sprintf("Incident stored successfully with ID %s", id),
+			"message": msg,
 		})
 	})
 }
