@@ -1,0 +1,158 @@
+# values.yaml – MCP-KB Incident Knowledge Base MCP Server
+# All fields are documented; override only what you need.
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: registry.example.com/mcp-kb
+  tag: latest
+  pullPolicy: Always
+  # pullSecrets:
+  #   - name: registry-credentials
+
+# ── Replica / scaling ─────────────────────────────────────────────────────────
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+# ── Transport ─────────────────────────────────────────────────────────────────
+transport: sse   # sse | stdio
+port: 8080
+
+# ── Embedding ─────────────────────────────────────────────────────────────────
+embedding:
+  # Base URL of an OpenAI-compatible embeddings API.
+  # Override to route through an internal proxy (e.g. LiteLLM).
+  baseURL: "https://api.openai.com/v1"
+  model: "text-embedding-3-small"
+  # API key injected from the secret below.
+
+# ── OIDC / Keycloak authentication (inbound request protection) ───────────────
+oidc:
+  # Keycloak realm URL used for OIDC discovery (/.well-known/openid-configuration
+  # is appended automatically).
+  # Example: https://keycloak.example.com/auth/realms/myrealm
+  issuerURL: ""
+
+  # Publicly reachable base URL of this service.  The /callback path is
+  # appended to form the redirect_uri registered in Keycloak.
+  # Example: https://mcp-kb.example.com
+  externalBaseURL: ""
+
+  # Optional RFC 7662 introspection endpoint.  When set, every token (both
+  # Bearer tokens from API clients and access tokens stored in session cookies)
+  # is validated against this endpoint.  Leave empty to skip introspection and
+  # rely on ID token verification + cookie integrity only.
+  introspectURL: ""
+
+  # Credentials populated from the secret defined in secrets.oidc below.
+
+# ── Database ──────────────────────────────────────────────────────────────────
+database:
+  host: "postgres-rw.mcp-kb.svc.cluster.local"
+  port: 5432
+  name: mcpkb
+  user: mcpkb
+  sslMode: require
+
+# ── PostgreSQL (bundled) ──────────────────────────────────────────────────────
+postgres:
+  # Set enabled: false to use an external PostgreSQL instance.
+  enabled: true
+  image:
+    repository: pgvector/pgvector
+    tag: pg16
+  storage:
+    size: 10Gi
+    # storageClassName: standard
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# IMPORTANT: do not commit real values. Use Sealed Secrets / External Secrets /
+# Vault in production and reference an externally managed Secret instead.
+secrets:
+  # Name of a pre-existing Secret to use instead of creating one from values.
+  # If set, all secrets.* values below are ignored.
+  existingSecret: ""
+
+  database:
+    password: "CHANGE_ME"
+
+  embedding:
+    apiKey: "CHANGE_ME"
+
+  oidc:
+    clientID: "CHANGE_ME"
+    clientSecret: "CHANGE_ME"
+    # 32-byte AES key for session cookie encryption, hex-encoded.
+    # Generate with: openssl rand -hex 32
+    # If unset, an ephemeral key is used (sessions won't survive pod restarts).
+    cookieEncryptionKey: ""
+
+# ── Resource limits (mcp-kb pod) ──────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  # ingressClassName selects the ingress controller.
+  className: nginx
+  annotations:
+    # Long timeouts are required for SSE (persistent HTTP connections).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Disable response buffering so SSE events are flushed immediately.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    # cert-manager: change to "letsencrypt-staging" for testing.
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: mcp-kb.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: mcp-kb-tls
+      hosts:
+        - mcp-kb.example.com
+
+# ── Network policy ────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+
+# ── Pod security / scheduling ─────────────────────────────────────────────────
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

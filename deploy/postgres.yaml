@@ -1,0 +1,201 @@
+# PostgreSQL with pgvector – PersistentVolumeClaim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # Set storageClassName to match your cluster's storage class.
+  # Leave unset to use the default storage class.
+  # storageClassName: standard
+---
+# ConfigMap: PostgreSQL init script applies the schema on first boot.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mcp-kb
+data:
+  # The schema.sql is mounted here. The official postgres image runs all
+  # *.sql files in /docker-entrypoint-initdb.d/ automatically on first start.
+  schema.sql: |
+    CREATE EXTENSION IF NOT EXISTS vector;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+    CREATE TABLE IF NOT EXISTS incidents (
+        id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+        title               TEXT        NOT NULL,
+        description         TEXT        NOT NULL,
+        affected_component  TEXT        NOT NULL,
+        severity            TEXT        NOT NULL
+                                CHECK (severity IN ('Critical','Major','Minor','Uncritical')),
+        environment         TEXT        NOT NULL DEFAULT 'prod',
+        root_cause          TEXT,
+        resolution          TEXT        NOT NULL,
+        runbook_url         TEXT,
+        tags                TEXT[]      NOT NULL DEFAULT '{}',
+        casm_ticket_id      TEXT,
+        alert_name          TEXT,
+        reported_by         TEXT,
+        resolved_by         TEXT,
+        occurred_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        resolved_at         TIMESTAMPTZ,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS incident_embeddings (
+        incident_id         UUID        NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+        model               TEXT        NOT NULL DEFAULT 'text-embedding-3-small',
+        embedding           vector(1536) NOT NULL,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (incident_id, model)
+    );
+
+    CREATE INDEX IF NOT EXISTS incident_embeddings_ivfflat_idx
+        ON incident_embeddings
+        USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100);
+
+    CREATE OR REPLACE FUNCTION set_updated_at()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    BEGIN
+        NEW.updated_at = NOW();
+        RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS incidents_updated_at ON incidents;
+    CREATE TRIGGER incidents_updated_at
+        BEFORE UPDATE ON incidents
+        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+---
+# Secret: PostgreSQL credentials
+# In production, manage this via Sealed Secrets, External Secrets Operator,
+# or Vault – do NOT commit plaintext secrets.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mcp-kb
+type: Opaque
+stringData:
+  # Override these values with your actual credentials.
+  POSTGRES_USER: mcpkb
+  POSTGRES_PASSWORD: CHANGE_ME
+  POSTGRES_DB: mcpkb
+---
+# StatefulSet: PostgreSQL with pgvector
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: mcp-kb
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: postgres
+          # pgvector is pre-installed in the official pgvector image.
+          image: pgvector/pgvector:pg16
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: postgres-credentials
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init-scripts
+          configMap:
+            name: postgres-init
+---
+# Service: headless for StatefulSet + ClusterIP for app access
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  clusterIP: None   # headless – StatefulSet DNS: postgres.mcp-kb.svc.cluster.local
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-rw
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

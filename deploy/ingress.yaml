@@ -1,0 +1,52 @@
+# Ingress: mcp-kb
+#
+# Controller : ingress-nginx  (kubernetes.io/ingress.class: nginx)
+# TLS        : cert-manager   (cert-manager.io/cluster-issuer annotation)
+#
+# Prerequisites:
+#   - ingress-nginx controller installed in the cluster
+#   - cert-manager installed with a ClusterIssuer named "letsencrypt-prod"
+#     (or adjust the annotation below to match your issuer name)
+#   - DNS record for the host pointing to the ingress controller's external IP
+#
+# The /callback path must be reachable from the internet so that Keycloak can
+# redirect back after authentication.  All other paths are protected by the
+# OIDC middleware inside the application.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-kb
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/part-of: mcp-kb
+  annotations:
+    # ── ingress-nginx ────────────────────────────────────────────────────────
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # SSE requires HTTP/1.1 chunked responses; disable buffering so events are
+    # flushed to the client immediately.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+
+    # ── cert-manager ─────────────────────────────────────────────────────────
+    # Change to "letsencrypt-staging" for testing to avoid rate limits.
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - mcp-kb.example.com
+      # cert-manager will create/renew this Secret automatically.
+      secretName: mcp-kb-tls
+  rules:
+    - host: mcp-kb.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-kb
+                port:
+                  name: http

@@ -1,0 +1,201 @@
+# Secret: mcp-kb runtime credentials
+# In production, use Sealed Secrets / External Secrets Operator / Vault.
+# Do NOT commit plaintext secrets.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mcp-kb
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/part-of: mcp-kb
+type: Opaque
+stringData:
+  # Database (must match postgres-credentials secret above)
+  DB_PASSWORD: CHANGE_ME
+
+  # OpenAI-compatible embedding API key
+  OPENAI_API_KEY: CHANGE_ME
+
+  # Keycloak OIDC client credentials
+  OIDC_CLIENT_ID: CHANGE_ME
+  OIDC_CLIENT_SECRET: CHANGE_ME
+  # 32-byte AES key for session cookie encryption, hex-encoded.
+  # Generate with: openssl rand -hex 32
+  OIDC_COOKIE_ENCRYPTION_KEY: CHANGE_ME
+---
+# Deployment: mcp-kb
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-kb
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-kb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-kb
+        app.kubernetes.io/part-of: mcp-kb
+      annotations:
+        # Force rollout when the secret changes (checksum-based strategy)
+        # kubectl annotate deployment mcp-kb ...
+        prometheus.io/scrape: "false"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+      containers:
+        - name: mcp-kb
+          image: registry.example.com/mcp-kb:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            # ── Database ──────────────────────────────────────────────────
+            - name: DB_HOST
+              value: "postgres-rw.mcp-kb.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-kb
+                  key: DB_PASSWORD
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            - name: DB_SSLMODE
+              value: "require"
+
+            # ── Embedding API ─────────────────────────────────────────────
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-kb
+                  key: OPENAI_API_KEY
+            # Override to use an internal OpenAI-compatible proxy if available:
+            # - name: OPENAI_BASE_URL
+            #   value: "https://openai-proxy.internal/v1"
+            - name: EMBEDDING_MODEL
+              value: "text-embedding-3-small"
+
+            # ── OIDC / Keycloak authentication ───────────────────────────
+            - name: OIDC_ISSUER_URL
+              # Keycloak realm URL; discovery is performed at startup.
+              value: "https://keycloak.example.com/auth/realms/myrealm"
+            - name: OIDC_EXTERNAL_BASE_URL
+              # Publicly reachable base URL of this service.  /callback is appended.
+              value: "https://mcp-kb.example.com"
+            - name: OIDC_INTROSPECT_URL
+              # Optional: validates tokens on every request (30 s cache applied).
+              value: "https://keycloak.example.com/auth/realms/myrealm/protocol/openid-connect/token/introspect"
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-kb
+                  key: OIDC_CLIENT_ID
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-kb
+                  key: OIDC_CLIENT_SECRET
+            - name: OIDC_COOKIE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-kb
+                  key: OIDC_COOKIE_ENCRYPTION_KEY
+
+            # ── Transport ─────────────────────────────────────────────────
+            - name: MCP_TRANSPORT
+              value: "sse"
+            - name: MCP_PORT
+              value: "8080"
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+      # Optional: pull from a private registry
+      # imagePullSecrets:
+      #   - name: registry-credentials
+---
+# Service: mcp-kb
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-kb
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-kb
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mcp-kb
+  namespace: mcp-kb
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/part-of: mcp-kb
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mcp-kb
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
