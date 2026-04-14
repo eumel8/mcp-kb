@@ -54,7 +54,7 @@ spec:
         runAsGroup: 65534
       containers:
         - name: mcp-kb
-          image: registry.example.com/mcp-kb:latest
+          image: ghcr.io/eumel8/mcp-kb:latest
           imagePullPolicy: Always
           ports:
             - name: http

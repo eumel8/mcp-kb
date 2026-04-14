@@ -207,7 +207,17 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 
-		// 3. No credentials – redirect to Keycloak
+		// 3. No credentials.
+		// SSE clients (Accept: text/event-stream) and other programmatic clients
+		// that did not supply a Bearer token must receive 401, not a browser
+		// redirect.  A redirect response is text/html and causes the MCP client
+		// to fail with "Invalid content type, expected text/event-stream".
+		if isAPIClient(r) {
+			http.Error(w, "unauthorized: supply Authorization: Bearer <token>", http.StatusUnauthorized)
+			return
+		}
+
+		// Browser with no credentials – redirect to Keycloak.
 		m.redirectToLogin(w, r)
 	})
 }
@@ -480,6 +490,34 @@ func isHTTPS(r *http.Request) bool {
 		return true
 	}
 	if proto := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
+		return true
+	}
+	return false
+}
+
+// isAPIClient reports whether the request looks like a programmatic / non-browser
+// client that cannot follow a login redirect.  Such clients should receive 401
+// rather than a 302 redirect to Keycloak.
+//
+// Detection heuristics (any one is sufficient):
+//   - Accept header contains "text/event-stream"  → MCP SSE client
+//   - Accept header is "application/json"          → REST API client
+//   - X-Requested-With: XMLHttpRequest             → AJAX call
+//   - No Accept header or Accept: */*              → curl / programmatic HTTP
+func isAPIClient(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "text/event-stream") {
+		return true
+	}
+	if strings.Contains(accept, "application/json") {
+		return true
+	}
+	if r.Header.Get("X-Requested-With") == "XMLHttpRequest" {
+		return true
+	}
+	// A real browser always sends a rich Accept header including text/html.
+	// If there is no Accept header, or it is exactly */*, assume a non-browser.
+	if accept == "" || accept == "*/*" {
 		return true
 	}
 	return false
