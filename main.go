@@ -1,23 +1,17 @@
 // Command mcp-kb is an MCP (Model Context Protocol) server that
-// provides a RAG-based incident knowledge base.
+// provides an incident knowledge base backed by PostgreSQL full-text search.
 //
 // # Overview
 //
 // When a new incident is being operated, the LLM calls kb_search_incidents to
-// retrieve semantically similar past incidents from the PostgreSQL/pgvector
-// store.  Once an incident is resolved, the LLM calls kb_store_incident to
-// persist the incident together with its embedding so future searches can find
-// it.
-//
-// # Embedding
-//
-// The server calls the OpenAI Embeddings API (text-embedding-3-small by
-// default) to convert free-text incident data into vectors.  Any
-// OpenAI-compatible endpoint is accepted via OPENAI_BASE_URL.
+// retrieve relevant past incidents from the PostgreSQL store using full-text
+// search (tsvector/tsquery).  Once an incident is resolved, the LLM calls
+// kb_store_incident to persist it; the search_vector column is maintained
+// automatically by a database trigger.
 //
 // # Authentication (inbound)
 //
-// The HTTP/SSE endpoint is protected via Keycloak (or any OIDC-compatible
+// The HTTP endpoint is protected via Keycloak (or any OIDC-compatible
 // provider) using the Authorization Code flow with encrypted session cookies.
 // Unauthenticated browser clients are automatically redirected to Keycloak.
 // Programmatic clients may alternatively supply an Authorization: Bearer
@@ -25,19 +19,16 @@
 //
 // Required variables: OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET,
 // OIDC_EXTERNAL_BASE_URL.
-// Optional: OIDC_INTROSPECT_URL (enables introspection for both bearer and
-// cookie sessions), OIDC_COOKIE_ENCRYPTION_KEY (32-byte hex; ephemeral if
-// unset).
+// Optional: OIDC_INTROSPECT_URL, OIDC_COOKIE_ENCRYPTION_KEY (32-byte hex).
 //
 // # Database
 //
-// Expects a PostgreSQL database with the pgvector extension and the schema
-// from db/schema.sql applied.  Configure via DATABASE_URL or the individual
-// DB_* variables.
+// Expects a PostgreSQL database with the schema from db/schema.sql applied.
+// Configure via DATABASE_URL or the individual DB_* variables.
 //
 // # Transport
 //
-// Set MCP_TRANSPORT=sse (default) to serve HTTP+SSE.
+// Set MCP_TRANSPORT=sse (default) to serve HTTP+SSE and Streamable HTTP.
 // Set MCP_TRANSPORT=stdio for subprocess / pipe mode (no auth middleware).
 // MCP_PORT controls the listen port (default 8080).
 package main
@@ -52,7 +43,6 @@ import (
 
 	"github.com/eumel8/mcp-kb/internal/auth"
 	"github.com/eumel8/mcp-kb/internal/db"
-	"github.com/eumel8/mcp-kb/internal/embedding"
 	"github.com/eumel8/mcp-kb/internal/tools"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -77,12 +67,6 @@ func run() error {
 	}
 	defer pool.Close()
 
-	// Embedding client – optional; nil when OPENAI_API_KEY is not set.
-	var embedClient *embedding.Client
-	if cfg.OpenAIAPIKey != "" {
-		embedClient = embedding.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.EmbeddingModel)
-	}
-
 	// MCP server
 	s := server.NewMCPServer(
 		"mcp-kb",
@@ -90,7 +74,7 @@ func run() error {
 		server.WithToolCapabilities(true),
 	)
 
-	tools.Register(s, pool, embedClient)
+	tools.Register(s, pool)
 
 	transport := cfg.Transport
 	switch transport {
@@ -168,10 +152,6 @@ type serverConfig struct {
 	Transport   string
 	Port        string
 
-	OpenAIAPIKey   string
-	OpenAIBaseURL  string
-	EmbeddingModel string
-
 	// OIDC / Keycloak
 	OIDCIssuerURL           string
 	OIDCClientID            string
@@ -184,7 +164,6 @@ type serverConfig struct {
 func configFromEnv() (serverConfig, error) {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		// Build from individual vars
 		host := getEnvOrDefault("DB_HOST", "localhost")
 		port := getEnvOrDefault("DB_PORT", "5432")
 		user := getEnvOrDefault("DB_USER", "mcp-kb")
@@ -192,11 +171,6 @@ func configFromEnv() (serverConfig, error) {
 		name := getEnvOrDefault("DB_NAME", "mcp-kb")
 		sslmode := getEnvOrDefault("DB_SSLMODE", "require")
 		dbURL = fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, sslmode)
-	}
-
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		slog.Info("OPENAI_API_KEY not set – vector search unavailable; kb_search_incidents will use full-text fallback, kb_store_incident will work without embedding")
 	}
 
 	var cookieKey []byte
@@ -215,10 +189,6 @@ func configFromEnv() (serverConfig, error) {
 		DatabaseURL: dbURL,
 		Transport:   getEnvOrDefault("MCP_TRANSPORT", "sse"),
 		Port:        getEnvOrDefault("MCP_PORT", "8080"),
-
-		OpenAIAPIKey:   apiKey,
-		OpenAIBaseURL:  getEnvOrDefault("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-		EmbeddingModel: getEnvOrDefault("EMBEDDING_MODEL", "text-embedding-3-small"),
 
 		OIDCIssuerURL:           os.Getenv("OIDC_ISSUER_URL"),
 		OIDCClientID:            os.Getenv("OIDC_CLIENT_ID"),

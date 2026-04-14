@@ -9,31 +9,29 @@ import (
 	"time"
 
 	"github.com/eumel8/mcp-kb/internal/db"
-	"github.com/eumel8/mcp-kb/internal/embedding"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
 // Register adds all knowledge-base tools to the MCP server.
-func Register(s *server.MCPServer, pool *pgxpool.Pool, embedClient *embedding.Client) {
-	registerSearchIncidents(s, pool, embedClient)
-	registerStoreIncident(s, pool, embedClient)
+func Register(s *server.MCPServer, pool *pgxpool.Pool) {
+	registerSearchIncidents(s, pool)
+	registerStoreIncident(s, pool)
 	registerGetIncident(s, pool)
 }
 
 // ── kb_search_incidents ───────────────────────────────────────────────────────
 
-func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool, embedClient *embedding.Client) {
+func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool) {
 	tool := mcp.NewTool("kb_search_incidents",
 		mcp.WithDescription(
-			"Search the incident knowledge base for similar past incidents using semantic (vector) similarity. "+
+			"Search the incident knowledge base for similar past incidents using full-text search. "+
 				"Call this tool at the start of incident response to retrieve relevant historical context, "+
 				"known root causes, and proven resolutions before investigating a new incident."),
 		mcp.WithString("query",
 			mcp.Required(),
-			mcp.Description("Free-text description of the current incident symptoms, alert name, or error message. "+
-				"The more detail you provide, the better the results.")),
+			mcp.Description("Free-text description of the current incident symptoms, alert name, or error message.")),
 		mcp.WithNumber("top_k",
 			mcp.Description("Maximum number of similar incidents to return (default: 5, max: 20).")),
 		mcp.WithString("severity",
@@ -68,25 +66,7 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool, embedClien
 			}
 		}
 
-		// Use vector similarity search when an embedding client is available,
-		// otherwise fall back to full-text ILIKE search.
-		if embedClient != nil {
-			emb, err := embedClient.Embed(ctx, query)
-			if err != nil {
-				return mcp.NewToolResultError("generate query embedding: " + err.Error()), nil
-			}
-			results, err := db.SearchIncidents(ctx, pool, emb, topK, filters)
-			if err != nil {
-				return mcp.NewToolResultError("search incidents: " + err.Error()), nil
-			}
-			if len(results) == 0 {
-				return mcp.NewToolResultText("No similar incidents found in the knowledge base."), nil
-			}
-			return jsonResult(results)
-		}
-
-		// Fallback: full-text search (no embedding required).
-		results, err := db.SearchIncidentsText(ctx, pool, query, topK, filters)
+		results, err := db.SearchIncidents(ctx, pool, query, topK, filters)
 		if err != nil {
 			return mcp.NewToolResultError("search incidents: " + err.Error()), nil
 		}
@@ -99,10 +79,10 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool, embedClien
 
 // ── kb_store_incident ─────────────────────────────────────────────────────────
 
-func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient *embedding.Client) {
+func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool) {
 	tool := mcp.NewTool("kb_store_incident",
 		mcp.WithDescription(
-			"Store a resolved incident in the knowledge base so it can be found by future semantic searches. "+
+			"Store a resolved incident in the knowledge base so it can be found by future searches. "+
 				"Call this tool after an incident has been fully resolved and root cause identified."),
 		mcp.WithString("title",
 			mcp.Required(),
@@ -152,7 +132,6 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 			return mcp.NewToolResultError("title, description, affected_component, severity, and resolution are required"), nil
 		}
 
-		// Validate severity
 		switch severity {
 		case "Critical", "Major", "Minor", "Uncritical":
 		default:
@@ -174,14 +153,12 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 			ResolvedBy:        mcp.ParseString(req, "resolved_by", ""),
 		}
 
-		// Tags
 		if tagStr := mcp.ParseString(req, "tags", ""); tagStr != "" {
 			for _, t := range strings.Split(tagStr, ",") {
 				inc.Tags = append(inc.Tags, strings.TrimSpace(t))
 			}
 		}
 
-		// Timestamps
 		now := time.Now().UTC()
 		if ts := mcp.ParseString(req, "occurred_at", ""); ts != "" {
 			t, err := time.Parse(time.RFC3339, ts)
@@ -203,30 +180,14 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 			inc.ResolvedAt = &now
 		}
 
-		// Generate embedding when client is available; store without one otherwise.
-		var emb []float32
-		if embedClient != nil {
-			embText := embedding.BuildIncidentText(
-				inc.Title, inc.Description, inc.RootCause, inc.Resolution, inc.Tags)
-			var err error
-			emb, err = embedClient.Embed(ctx, embText)
-			if err != nil {
-				return mcp.NewToolResultError("generate embedding: " + err.Error()), nil
-			}
-		}
-
-		id, err := db.StoreIncident(ctx, pool, inc, emb)
+		id, err := db.StoreIncident(ctx, pool, inc)
 		if err != nil {
 			return mcp.NewToolResultError("store incident: " + err.Error()), nil
 		}
 
-		msg := fmt.Sprintf("Incident stored successfully with ID %s", id)
-		if emb == nil {
-			msg += " (no embedding — vector search unavailable for this entry)"
-		}
 		return jsonResult(map[string]string{
 			"id":      id,
-			"message": msg,
+			"message": fmt.Sprintf("Incident stored successfully with ID %s", id),
 		})
 	})
 }
@@ -246,7 +207,6 @@ func registerGetIncident(s *server.MCPServer, pool *pgxpool.Pool) {
 		if id == "" {
 			return mcp.NewToolResultError("id is required"), nil
 		}
-
 		inc, err := db.GetIncident(ctx, pool, id)
 		if err != nil {
 			return mcp.NewToolResultError("get incident: " + err.Error()), nil
