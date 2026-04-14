@@ -462,9 +462,13 @@ func (m *Middleware) RegisterHandler() http.HandlerFunc {
 		}
 
 		// RFC 7591 §3.2.1 successful response: echo back the client metadata
-		// plus the server-assigned client_id.
+		// plus the server-assigned client_id and client_secret.
+		// Although PKCE public clients do not use a client_secret, some MCP
+		// clients (e.g. OpenCode) require the field to be present in the
+		// registration response in order to proceed with the token exchange.
 		type registrationResponse struct {
 			ClientID                string   `json:"client_id"`
+			ClientSecret            string   `json:"client_secret"`
 			ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
 			RedirectURIs            []string `json:"redirect_uris"`
 			TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
@@ -476,6 +480,7 @@ func (m *Middleware) RegisterHandler() http.HandlerFunc {
 
 		resp := registrationResponse{
 			ClientID:                m.cfg.ClientID,
+			ClientSecret:            m.cfg.ClientSecret,
 			ClientIDIssuedAt:        0, // 0 = unknown issuance time per RFC 7591
 			RedirectURIs:            req.RedirectURIs,
 			TokenEndpointAuthMethod: req.TokenEndpointAuthMethod,
