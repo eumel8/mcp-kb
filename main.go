@@ -97,13 +97,16 @@ func run() error {
 	case "stdio":
 		slog.Info("starting stdio server")
 		return server.ServeStdio(s)
-	default: // sse
+	default: // sse + streamable HTTP
 		port := cfg.Port
 		addr := ":" + port
 
+		// Legacy SSE transport (MCP 2024) – kept for backward compatibility.
 		sseServer := server.NewSSEServer(s, server.WithBaseURL("http://localhost:"+port))
 
-		var handler http.Handler = sseServer
+		// Streamable HTTP transport (MCP 2025) – OpenCode and other modern
+		// clients use this; it POSTs to /mcp by default.
+		streamServer := server.NewStreamableHTTPServer(s)
 
 		mux := http.NewServeMux()
 
@@ -137,22 +140,25 @@ func run() error {
 			mux.Handle("/register", authMiddleware.RegisterHandler())
 			mux.Handle("/callback", authMiddleware.CallbackHandler())
 
-			// Everything else requires a valid token or session cookie.
+			// Both transports behind the auth middleware.
+			mux.Handle("/mcp", authMiddleware.Wrap(streamServer))
+			mux.Handle("/sse", authMiddleware.Wrap(sseServer))
+			mux.Handle("/message", authMiddleware.Wrap(sseServer))
+			// Catch-all for any other paths (also auth-protected).
 			mux.Handle("/", authMiddleware.Wrap(sseServer))
-			handler = mux
 
 			slog.Info("OIDC authentication enabled",
 				"issuer", cfg.OIDCIssuerURL,
 				"external_base_url", cfg.OIDCExternalBaseURL,
 			)
 		} else {
+			mux.Handle("/mcp", streamServer)
 			mux.Handle("/", sseServer)
-			handler = mux
 			slog.Warn("OIDC not configured – endpoint is unauthenticated")
 		}
 
-		slog.Info("starting SSE server", "addr", addr)
-		return http.ListenAndServe(addr, handler)
+		slog.Info("starting SSE+Streamable HTTP server", "addr", addr)
+		return http.ListenAndServe(addr, mux)
 	}
 }
 
