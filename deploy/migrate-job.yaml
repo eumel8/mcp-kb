@@ -1,0 +1,198 @@
+# db-migrate Job
+#
+# Runs all SQL files in db/ against the mcpkb PostgreSQL database in order.
+# Apply with:
+#   kubectl apply -f deploy/migrate-job.yaml
+#   kubectl -n observability-system wait --for=condition=complete job/db-migrate --timeout=120s
+#   kubectl -n observability-system logs job/db-migrate
+#
+# To re-run (e.g. after adding a new migration), delete the old Job first:
+#   kubectl -n observability-system delete job db-migrate
+#   kubectl apply -f deploy/migrate-job.yaml
+#
+# The SQL files are idempotent (CREATE IF NOT EXISTS, DROP IF EXISTS,
+# ADD COLUMN IF NOT EXISTS) so re-running is safe.
+
+---
+# ConfigMap: embed every SQL file from db/ so no image build is required.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-migrate-sql
+  namespace: observability-system
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/component: db-migrate
+data:
+  # ── 000: base schema (fresh installs only) ─────────────────────────────────
+  # Applied first.  All statements use IF NOT EXISTS / OR REPLACE so they are
+  # harmless on an already-initialised database.
+  000_schema.sql: |
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+    CREATE TABLE IF NOT EXISTS incidents (
+        id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+        title               TEXT        NOT NULL,
+        description         TEXT        NOT NULL,
+        affected_component  TEXT        NOT NULL,
+        severity            TEXT        NOT NULL
+                                CHECK (severity IN ('Critical','Major','Minor','Uncritical')),
+        environment         TEXT        NOT NULL DEFAULT 'prod',
+        root_cause          TEXT,
+        resolution          TEXT        NOT NULL,
+        runbook_url         TEXT,
+        tags                TEXT[]      NOT NULL DEFAULT '{}',
+        casm_ticket_id      TEXT        UNIQUE,
+        alert_name          TEXT,
+        reported_by         TEXT,
+        resolved_by         TEXT,
+        occurred_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        resolved_at         TIMESTAMPTZ,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        search_vector       TSVECTOR
+    );
+
+    CREATE INDEX IF NOT EXISTS incidents_search_vector_idx
+        ON incidents USING GIN (search_vector);
+
+    CREATE OR REPLACE FUNCTION incidents_update_trigger_fn()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $$
+    BEGIN
+        NEW.updated_at    := NOW();
+        NEW.search_vector :=
+            setweight(to_tsvector('english', COALESCE(NEW.title,              '')), 'A') ||
+            setweight(to_tsvector('english', COALESCE(NEW.description,        '')), 'B') ||
+            setweight(to_tsvector('english', COALESCE(NEW.root_cause,         '')), 'B') ||
+            setweight(to_tsvector('english', COALESCE(NEW.resolution,         '')), 'C') ||
+            setweight(to_tsvector('english', COALESCE(NEW.affected_component, '')), 'A') ||
+            setweight(to_tsvector('english', COALESCE(array_to_string(NEW.tags, ' '), '')), 'B');
+        RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS incidents_update_trigger ON incidents;
+    CREATE TRIGGER incidents_update_trigger
+        BEFORE INSERT OR UPDATE ON incidents
+        FOR EACH ROW EXECUTE FUNCTION incidents_update_trigger_fn();
+
+  # ── 002: replace pgvector/embeddings with full-text search ─────────────────
+  # Safe to re-run: drops old objects only if they exist, adds column with
+  # IF NOT EXISTS, creates index with IF NOT EXISTS.
+  002_fulltext_search.sql: |
+    BEGIN;
+
+    DROP VIEW  IF EXISTS incidents_with_embeddings;
+    DROP TABLE IF EXISTS incident_embeddings CASCADE;
+
+    DROP TRIGGER  IF EXISTS incidents_updated_at ON incidents;
+    DROP FUNCTION IF EXISTS set_updated_at() CASCADE;
+
+    ALTER TABLE incidents ADD COLUMN IF NOT EXISTS search_vector tsvector;
+
+    CREATE OR REPLACE FUNCTION incidents_update_trigger_fn()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      NEW.updated_at := now();
+      NEW.search_vector :=
+        setweight(to_tsvector('english', coalesce(NEW.title,              '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(NEW.description,        '')), 'B') ||
+        setweight(to_tsvector('english', coalesce(NEW.root_cause,         '')), 'B') ||
+        setweight(to_tsvector('english', coalesce(NEW.resolution,         '')), 'C') ||
+        setweight(to_tsvector('english', coalesce(NEW.affected_component, '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(array_to_string(NEW.tags, ' '), '')), 'B');
+      RETURN NEW;
+    END;
+    $$;
+
+    DROP TRIGGER IF EXISTS incidents_update_trigger ON incidents;
+    CREATE TRIGGER incidents_update_trigger
+      BEFORE INSERT OR UPDATE ON incidents
+      FOR EACH ROW EXECUTE FUNCTION incidents_update_trigger_fn();
+
+    -- Back-fill search_vector for existing rows
+    UPDATE incidents SET updated_at = updated_at;
+
+    CREATE INDEX IF NOT EXISTS incidents_search_vector_idx
+      ON incidents USING GIN (search_vector);
+
+    COMMIT;
+
+---
+# Job: run psql for each SQL file in alphabetical order.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: observability-system
+  labels:
+    app.kubernetes.io/name: mcp-kb
+    app.kubernetes.io/component: db-migrate
+spec:
+  ttlSecondsAfterFinished: 600   # auto-clean after 10 min; remove to keep logs
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-kb
+        app.kubernetes.io/component: db-migrate
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -exc
+            - |
+              # Build the connection URL from individual env vars (valueFrom
+              # refs are not interpolated inside a single env value field).
+              DB_URL="postgresql://${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=${DB_SSLMODE}"
+              # Run every *.sql file in the mounted directory, sorted by name.
+              for f in $(ls /migrations/*.sql | sort); do
+                echo "==> applying $f"
+                psql "$DB_URL" -v ON_ERROR_STOP=1 -f "$f"
+              done
+              echo "==> all migrations applied"
+          env:
+            # PGPASSWORD is read by libpq automatically
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-kb
+                  key: DB_PASSWORD
+            - name: DB_HOST
+              value: "postgres-rw.observability-system.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            - name: DB_SSLMODE
+              value: "prefer"
+          volumeMounts:
+            - name: sql
+              mountPath: /migrations
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: sql
+          configMap:
+            name: db-migrate-sql

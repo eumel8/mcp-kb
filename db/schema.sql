@@ -1,6 +1,9 @@
 -- MCP-KB Incident Knowledge Base – PostgreSQL schema
--- Apply once against the target database:
---   psql -U <user> -d <db> -f schema.sql
+-- Apply once against an empty database:
+--   psql -U <user> -d <db> -f db/schema.sql
+--
+-- For an existing database use the numbered migration files in db/:
+--   psql -U <user> -d <db> -f db/migrate_002_fulltext_search.sql
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
@@ -34,9 +37,11 @@ CREATE TABLE IF NOT EXISTS incidents (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-    -- Full-text search vector: weighted combination of all text fields.
-    -- 'A' = title (highest weight), 'B' = affected_component + severity,
-    -- 'C' = root_cause + resolution, 'D' = description + tags (lowest weight).
+    -- Full-text search vector maintained automatically by the trigger below.
+    -- Weight mapping:
+    --   A = title, affected_component  (most relevant)
+    --   B = description, root_cause, tags
+    --   C = resolution                 (least relevant)
     search_vector       TSVECTOR
 );
 
@@ -45,18 +50,20 @@ CREATE INDEX IF NOT EXISTS incidents_search_vector_idx
     ON incidents USING GIN (search_vector);
 
 -- ---------------------------------------------------------------------------
--- Trigger: maintain search_vector and updated_at automatically
+-- Trigger: maintain search_vector and updated_at on every INSERT / UPDATE
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE FUNCTION incidents_update_trigger()
+CREATE OR REPLACE FUNCTION incidents_update_trigger_fn()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
-    NEW.updated_at     := NOW();
-    NEW.search_vector  :=
-        setweight(to_tsvector('english', COALESCE(NEW.title, '')),        'A') ||
-        setweight(to_tsvector('english', COALESCE(NEW.affected_component, '') || ' ' || COALESCE(NEW.severity, '')), 'B') ||
-        setweight(to_tsvector('english', COALESCE(NEW.root_cause, '') || ' ' || COALESCE(NEW.resolution, '')),       'C') ||
-        setweight(to_tsvector('english', COALESCE(NEW.description, '') || ' ' || array_to_string(COALESCE(NEW.tags, '{}'), ' ')), 'D');
+    NEW.updated_at    := NOW();
+    NEW.search_vector :=
+        setweight(to_tsvector('english', COALESCE(NEW.title,              '')), 'A') ||
+        setweight(to_tsvector('english', COALESCE(NEW.description,        '')), 'B') ||
+        setweight(to_tsvector('english', COALESCE(NEW.root_cause,         '')), 'B') ||
+        setweight(to_tsvector('english', COALESCE(NEW.resolution,         '')), 'C') ||
+        setweight(to_tsvector('english', COALESCE(NEW.affected_component, '')), 'A') ||
+        setweight(to_tsvector('english', COALESCE(array_to_string(NEW.tags, ' '), '')), 'B');
     RETURN NEW;
 END;
 $$;
@@ -64,4 +71,4 @@ $$;
 DROP TRIGGER IF EXISTS incidents_update_trigger ON incidents;
 CREATE TRIGGER incidents_update_trigger
     BEFORE INSERT OR UPDATE ON incidents
-    FOR EACH ROW EXECUTE FUNCTION incidents_update_trigger();
+    FOR EACH ROW EXECUTE FUNCTION incidents_update_trigger_fn();
