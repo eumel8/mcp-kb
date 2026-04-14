@@ -171,6 +171,8 @@ func NewMiddleware(ctx context.Context, cfg Config) (*Middleware, error) {
 // register the /callback route – call RegisterCallback on your mux separately.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slog.Debug("auth: incoming request", "method", r.Method, "path", r.URL.Path, "accept", r.Header.Get("Accept"))
+
 		// 1. Programmatic path: Authorization: Bearer <token>
 		if token, ok := bearerToken(r); ok {
 			active, err := m.isActive(r.Context(), token)
@@ -224,6 +226,16 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 // callback at /callback.  Register it on your mux at the exact path.
 func (m *Middleware) CallbackHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("callback: received", "state", r.URL.Query().Get("state") != "", "code", r.URL.Query().Get("code") != "", "error", r.URL.Query().Get("error"))
+
+		// Surface any error from Keycloak (e.g. access_denied).
+		if errParam := r.URL.Query().Get("error"); errParam != "" {
+			desc := r.URL.Query().Get("error_description")
+			slog.Warn("callback: Keycloak returned error", "error", errParam, "description", desc)
+			http.Error(w, fmt.Sprintf("login failed: %s – %s", errParam, desc), http.StatusUnauthorized)
+			return
+		}
+
 		// Validate state (we use a hash of the CSRF cookie as the state)
 		state := r.URL.Query().Get("state")
 		if !m.validateState(r, state) {
@@ -480,6 +492,23 @@ func (m *Middleware) RegisterHandler() http.HandlerFunc {
 	}
 }
 
+// hopByHopHeaders are headers that must not be forwarded between hops per
+// RFC 7230 §6.1.  Forwarding them verbatim (especially Transfer-Encoding and
+// Content-Length) causes response corruption when Go's HTTP client has already
+// decoded the body.
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"Te":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+	// Content-Length is re-set by Go's ResponseWriter from the actual body size.
+	"Content-Length": true,
+}
+
 // proxyToKeycloak forwards the incoming request body and selected headers to
 // targetURL and copies the response back to w.
 func (m *Middleware) proxyToKeycloak(w http.ResponseWriter, r *http.Request, targetURL string) {
@@ -504,8 +533,15 @@ func (m *Middleware) proxyToKeycloak(w http.ResponseWriter, r *http.Request, tar
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers and status.
+	slog.Debug("proxy: upstream response", "url", targetURL, "status", resp.StatusCode)
+
+	// Copy safe (non-hop-by-hop) response headers only.
+	// Forwarding Transfer-Encoding or Content-Length verbatim from Keycloak's
+	// HTTP/2 response would corrupt the HTTP/1.1 response to the MCP client.
 	for k, vv := range resp.Header {
+		if hopByHopHeaders[http.CanonicalHeaderKey(k)] {
+			continue
+		}
 		for _, v := range vv {
 			w.Header().Add(k, v)
 		}
