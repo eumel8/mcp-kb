@@ -178,11 +178,11 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			active, err := m.isActive(r.Context(), token)
 			if err != nil {
 				slog.Error("bearer token introspection failed", "err", err)
-				http.Error(w, "token introspection error", http.StatusUnauthorized)
+				oauthError(w, "server_error", "token introspection error", http.StatusUnauthorized)
 				return
 			}
 			if !active {
-				http.Error(w, "token inactive or expired", http.StatusUnauthorized)
+				oauthError(w, "invalid_token", "token inactive or expired", http.StatusUnauthorized)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -213,7 +213,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		// redirect.  A redirect response is text/html and causes the MCP client
 		// to fail with "Invalid content type, expected text/event-stream".
 		if isAPIClient(r) {
-			http.Error(w, "unauthorized: supply Authorization: Bearer <token>", http.StatusUnauthorized)
+			oauthError(w, "unauthorized_client", "supply Authorization: Bearer <token>", http.StatusUnauthorized)
 			return
 		}
 
@@ -255,7 +255,7 @@ func (m *Middleware) CallbackHandler() http.HandlerFunc {
 		}
 		if _, err := m.verifier.Verify(r.Context(), rawIDToken); err != nil {
 			slog.Error("ID token verification failed", "err", err)
-			http.Error(w, "ID token verification failed", http.StatusUnauthorized)
+			oauthError(w, "invalid_token", "ID token verification failed", http.StatusUnauthorized)
 			return
 		}
 
@@ -463,6 +463,22 @@ func (m *Middleware) introspect(ctx context.Context, token string) (bool, error)
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+// oauthError writes an RFC 6749-compliant JSON error response and sets the
+// WWW-Authenticate header as required by RFC 6750 §3.1.
+//
+// The body format is:  {"error":"<code>","error_description":"<desc>"}
+func oauthError(w http.ResponseWriter, code, desc string, status int) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error=%q, error_description=%q`, code, desc))
+	w.WriteHeader(status)
+	// Inline marshal – no external dependency needed for this simple shape.
+	body, _ := json.Marshal(struct {
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}{Error: code, Description: desc})
+	_, _ = w.Write(body)
+}
 
 // bearerToken extracts the bearer token from the Authorization header.
 func bearerToken(r *http.Request) (string, bool) {

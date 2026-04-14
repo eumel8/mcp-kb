@@ -105,6 +105,17 @@ func run() error {
 
 		var handler http.Handler = sseServer
 
+		mux := http.NewServeMux()
+
+		// /healthz is intentionally outside the auth middleware so that the
+		// Kubernetes liveness and readiness probes always get a 200 OK without
+		// needing credentials.
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+		})
+
 		if cfg.OIDCIssuerURL != "" {
 			authMiddleware, err := auth.NewMiddleware(context.Background(), auth.Config{
 				IssuerURL:           cfg.OIDCIssuerURL,
@@ -118,7 +129,6 @@ func run() error {
 				return fmt.Errorf("create auth middleware: %w", err)
 			}
 
-			mux := http.NewServeMux()
 			mux.Handle("/callback", authMiddleware.CallbackHandler())
 			mux.Handle("/", authMiddleware.Wrap(sseServer))
 			handler = mux
@@ -128,6 +138,8 @@ func run() error {
 				"external_base_url", cfg.OIDCExternalBaseURL,
 			)
 		} else {
+			mux.Handle("/", sseServer)
+			handler = mux
 			slog.Warn("OIDC not configured – endpoint is unauthenticated")
 		}
 
