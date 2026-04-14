@@ -11,7 +11,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/${{ github.repository }}
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-binaries:
