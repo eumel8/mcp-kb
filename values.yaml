@@ -3,7 +3,7 @@
 
 # ── Image ─────────────────────────────────────────────────────────────────────
 image:
-  repository: registry.example.com/mcp-kb
+  repository: ghcr.io/eumel8/mcp-kb
   tag: latest
   pullPolicy: Always
   # pullSecrets:
