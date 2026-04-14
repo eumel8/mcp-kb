@@ -341,17 +341,17 @@ func (m *Middleware) MetadataHandler() http.HandlerFunc {
 	}
 
 	doc := metadata{
-		Issuer:                            base,
-		AuthorizationEndpoint:             base + "/authorize",
-		TokenEndpoint:                     base + "/token",
+		Issuer:                base,
+		AuthorizationEndpoint: base + "/authorize",
+		TokenEndpoint:         base + "/token",
+		// Advertise our stub registration endpoint so MCP clients that require
+		// dynamic client registration (RFC 7591) don't fail.  The handler
+		// returns the pre-configured client_id rather than creating a new one.
+		RegistrationEndpoint:              base + "/register",
 		ResponseTypesSupported:            responseTypes,
 		GrantTypesSupported:               grantTypes,
 		TokenEndpointAuthMethodsSupported: authMethods,
 		CodeChallengeMethodsSupported:     ccMethods,
-		// registration_endpoint is intentionally omitted: Keycloak's client
-		// registration is admin-controlled and rejects requests from unknown
-		// hosts.  MCP clients will fall back to prompting the user for a
-		// pre-registered client_id instead.
 	}
 	if kc.IntrospectionEndpoint != "" {
 		doc.IntrospectionEndpoint = kc.IntrospectionEndpoint
@@ -406,15 +406,41 @@ func (m *Middleware) TokenHandler() http.HandlerFunc {
 	}
 }
 
-// RegisterHandler always returns 404 to signal that dynamic client
-// registration (RFC 7591) is not supported.  Keycloak's registration endpoint
-// is admin-controlled and rejects requests from untrusted hosts; advertising
-// it would cause MCP clients to receive a "Trusted Hosts" rejection from
-// Keycloak.  Without a registration_endpoint in the metadata document MCP
-// clients fall back to prompting the user for a pre-registered client_id.
+// RegisterHandler implements a stub RFC 7591 Dynamic Client Registration
+// endpoint.  Rather than creating a new Keycloak client (which requires admin
+// privileges and is blocked by Keycloak's Trusted Hosts policy), it always
+// returns the pre-configured client_id.  This satisfies MCP clients that
+// require a registration_endpoint while keeping Keycloak client management
+// fully under operator control.
 func (m *Middleware) RegisterHandler() http.HandlerFunc {
+	// RFC 7591 §3.2.1 successful response body (subset).
+	type registrationResponse struct {
+		ClientID                string   `json:"client_id"`
+		ClientIDIssuedAt        int64    `json:"client_id_issued_at"`
+		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+		GrantTypes              []string `json:"grant_types"`
+		ResponseTypes           []string `json:"response_types"`
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// Drain and discard the request body – we don't use it.
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		resp := registrationResponse{
+			ClientID:                m.cfg.ClientID,
+			ClientIDIssuedAt:        0,      // 0 = unknown issuance time per RFC 7591
+			TokenEndpointAuthMethod: "none", // public client – PKCE only
+			GrantTypes:              []string{"authorization_code", "refresh_token"},
+			ResponseTypes:           []string{"code"},
+		}
+		body, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(body)
 	}
 }
 
