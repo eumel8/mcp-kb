@@ -47,6 +47,9 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool, embedClien
 	)
 
 	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if embedClient == nil {
+			return mcp.NewToolResultError("embedding is not configured (OPENAI_API_KEY is not set)"), nil
+		}
 		query := mcp.ParseString(req, "query", "")
 		if query == "" {
 			return mcp.NewToolResultError("query is required"), nil
@@ -131,6 +134,9 @@ func registerStoreIncident(s *server.MCPServer, pool *pgxpool.Pool, embedClient 
 	)
 
 	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if embedClient == nil {
+			return mcp.NewToolResultError("embedding is not configured (OPENAI_API_KEY is not set)"), nil
+		}
 		title := mcp.ParseString(req, "title", "")
 		description := mcp.ParseString(req, "description", "")
 		component := mcp.ParseString(req, "affected_component", "")

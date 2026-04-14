@@ -77,8 +77,11 @@ func run() error {
 	}
 	defer pool.Close()
 
-	// Embedding client
-	embedClient := embedding.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.EmbeddingModel)
+	// Embedding client – optional; nil when OPENAI_API_KEY is not set.
+	var embedClient *embedding.Client
+	if cfg.OpenAIAPIKey != "" {
+		embedClient = embedding.NewOpenAIClient(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.EmbeddingModel)
+	}
 
 	// MCP server
 	s := server.NewMCPServer(
@@ -167,7 +170,7 @@ func configFromEnv() (serverConfig, error) {
 
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		return serverConfig{}, fmt.Errorf("OPENAI_API_KEY is required")
+		slog.Warn("OPENAI_API_KEY not set – embedding features (kb_search_incidents, kb_store_incident) will be unavailable")
 	}
 
 	var cookieKey []byte
