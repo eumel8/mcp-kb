@@ -36,6 +36,7 @@ LLM Agent / Browser
 │    kb_search_incidents                   │
 │    kb_store_incident                     │
 │    kb_get_incident                       │
+│    kb_stats                              │
 └──────────┬───────────────────────────────┘
            │  pgx / pgvector
            ▼
@@ -55,6 +56,7 @@ LLM Agent / Browser
 | `kb_search_incidents` | Semantic search for similar past incidents. Call this **before** investigating a new incident. |
 | `kb_store_incident` | Persist a resolved incident with its embedding. Call this **after** an incident is fully resolved. |
 | `kb_get_incident` | Retrieve full details of a specific incident by UUID. |
+| `kb_stats` | Return aggregate KB statistics: total incident count, breakdowns by severity and environment, and oldest/newest entry timestamps. Takes no parameters. |
 
 ### kb_search_incidents
 
@@ -92,6 +94,18 @@ LLM Agent / Browser
 | Parameter | Required | Description |
 |---|---|---|
 | `id` | yes | Incident UUID |
+
+### kb_stats
+
+No parameters. Returns a JSON object with:
+
+| Field | Description |
+|---|---|
+| `total` | Total number of incidents in the knowledge base |
+| `by_severity` | Map of severity → count |
+| `by_environment` | Map of environment → count |
+| `oldest_at` | `created_at` of the oldest incident (RFC3339) |
+| `newest_at` | `created_at` of the newest incident (RFC3339) |
 
 ---
 
