@@ -19,6 +19,26 @@ func Register(s *server.MCPServer, pool *pgxpool.Pool) {
 	registerSearchIncidents(s, pool)
 	registerStoreIncident(s, pool)
 	registerGetIncident(s, pool)
+	registerStats(s, pool)
+}
+
+// ── kb_stats ──────────────────────────────────────────────────────────────────
+
+func registerStats(s *server.MCPServer, pool *pgxpool.Pool) {
+	tool := mcp.NewTool("kb_stats",
+		mcp.WithDescription(
+			"Return aggregate statistics for the incident knowledge base: total number "+
+				"of stored incidents, breakdowns by severity and environment, and the "+
+				"timestamps of the oldest and newest entries. Takes no parameters."),
+	)
+
+	s.AddTool(tool, func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		stats, err := db.GetStats(ctx, pool)
+		if err != nil {
+			return mcp.NewToolResultError("get stats: " + err.Error()), nil
+		}
+		return jsonResult(stats)
+	})
 }
 
 // ── kb_search_incidents ───────────────────────────────────────────────────────

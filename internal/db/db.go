@@ -209,6 +209,70 @@ func SearchIncidents(ctx context.Context, pool *pgxpool.Pool, query string, topK
 	return results, rows.Err()
 }
 
+// Stats aggregates knowledge-base statistics: total incident count plus
+// breakdowns by severity and environment, and newest/oldest created timestamps.
+type Stats struct {
+	Total         int            `json:"total"`
+	BySeverity    map[string]int `json:"by_severity"`
+	ByEnvironment map[string]int `json:"by_environment"`
+	OldestAt      *time.Time     `json:"oldest_at,omitempty"`
+	NewestAt      *time.Time     `json:"newest_at,omitempty"`
+}
+
+// GetStats returns aggregate counts over the incidents table.
+func GetStats(ctx context.Context, pool *pgxpool.Pool) (*Stats, error) {
+	s := &Stats{
+		BySeverity:    map[string]int{},
+		ByEnvironment: map[string]int{},
+	}
+
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM incidents`,
+	).Scan(&s.Total, &s.OldestAt, &s.NewestAt); err != nil {
+		return nil, fmt.Errorf("count incidents: %w", err)
+	}
+
+	sevRows, err := pool.Query(ctx, `
+		SELECT severity, COUNT(*) FROM incidents GROUP BY severity ORDER BY severity`)
+	if err != nil {
+		return nil, fmt.Errorf("group by severity: %w", err)
+	}
+	for sevRows.Next() {
+		var sev string
+		var n int
+		if err := sevRows.Scan(&sev, &n); err != nil {
+			sevRows.Close()
+			return nil, fmt.Errorf("scan severity: %w", err)
+		}
+		s.BySeverity[sev] = n
+	}
+	sevRows.Close()
+	if err := sevRows.Err(); err != nil {
+		return nil, err
+	}
+
+	envRows, err := pool.Query(ctx, `
+		SELECT environment, COUNT(*) FROM incidents GROUP BY environment ORDER BY environment`)
+	if err != nil {
+		return nil, fmt.Errorf("group by environment: %w", err)
+	}
+	for envRows.Next() {
+		var env string
+		var n int
+		if err := envRows.Scan(&env, &n); err != nil {
+			envRows.Close()
+			return nil, fmt.Errorf("scan environment: %w", err)
+		}
+		s.ByEnvironment[env] = n
+	}
+	envRows.Close()
+	if err := envRows.Err(); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
 // GetIncident returns a single incident by ID.
 func GetIncident(ctx context.Context, pool *pgxpool.Pool, id string) (*Incident, error) {
 	var inc Incident
