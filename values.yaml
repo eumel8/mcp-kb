@@ -48,6 +48,10 @@ oidc:
   # rely on ID token verification + cookie integrity only.
   introspectURL: ""
 
+  # Browser session cookie lifetime in seconds.  This should not exceed the
+  # Keycloak access token lifespan when introspection is enabled.
+  sessionCookieMaxAgeSeconds: 3600
+
   # Credentials populated from the secret defined in secrets.oidc below.
 
 # ── Database ──────────────────────────────────────────────────────────────────

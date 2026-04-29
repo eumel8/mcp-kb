@@ -143,6 +143,7 @@ All configuration is via environment variables:
 | `OIDC_EXTERNAL_BASE_URL` | **yes** (if auth) | — | Publicly reachable base URL of this service. `/callback` is appended to form the `redirect_uri`. Example: `https://mcp-kb.example.com` |
 | `OIDC_INTROSPECT_URL` | no | — | RFC 7662 token introspection endpoint. When set, validates every token (Bearer and cookie) against Keycloak with a 30 s cache. |
 | `OIDC_COOKIE_ENCRYPTION_KEY` | no | ephemeral | Hex-encoded 32-byte AES key for session cookie encryption. Generate with `openssl rand -hex 32`. If unset, a random key is generated at startup (sessions won't survive pod restarts). |
+| `OIDC_SESSION_COOKIE_MAX_AGE_SECONDS` | no | `3600` | Browser session cookie lifetime in seconds. When `OIDC_INTROSPECT_URL` is set, this should not exceed the Keycloak access token lifespan because expired tokens still force re-authentication. |
 
 #### Auth flow summary
 
@@ -329,6 +330,7 @@ oidc:
   issuerURL: "https://keycloak.prod.example.com/auth/realms/myrealm"
   externalBaseURL: "https://mcp-kb.prod.example.com"
   introspectURL: "https://keycloak.prod.example.com/auth/realms/myrealm/protocol/openid-connect/token/introspect"
+  sessionCookieMaxAgeSeconds: 28800
 
 ingress:
   enabled: true
@@ -360,6 +362,9 @@ secrets:
 - **Browser clients** are authenticated via the Keycloak OIDC Authorization
   Code flow.  The resulting access token is stored in an AES-GCM-encrypted
   HTTP-only session cookie.
+- Browser session duration is controlled by `OIDC_SESSION_COOKIE_MAX_AGE_SECONDS`.
+  If token introspection is enabled, Keycloak must also keep the access token
+  active for at least that long.
 - **Programmatic/API clients** supply `Authorization: Bearer <token>`, which
   is validated via RFC 7662 introspection against Keycloak.
 - Introspection results are **cached for 30 seconds** to avoid hammering

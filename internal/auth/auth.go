@@ -71,6 +71,10 @@ type Config struct {
 	// If empty, only ID-token presence is checked for cookie sessions.
 	IntrospectURL string
 
+	// SessionCookieMaxAgeSeconds controls the browser session cookie lifetime.
+	// Defaults to 3600 seconds.
+	SessionCookieMaxAgeSeconds int
+
 	// CacheTTL is how long a "token active" introspection result is cached.
 	// Defaults to 30 s.  Set to 0 to disable caching.
 	CacheTTL time.Duration
@@ -102,9 +106,10 @@ type introspectResponse struct {
 }
 
 const (
-	sessionCookieName  = "mcp_session"
-	redirectCookieName = "mcp_redirect"
-	callbackPath       = "/callback"
+	sessionCookieName                 = "mcp_session"
+	redirectCookieName                = "mcp_redirect"
+	callbackPath                      = "/callback"
+	defaultSessionCookieMaxAgeSeconds = 3600
 )
 
 // NewMiddleware creates and initialises the auth middleware.  It performs OIDC
@@ -121,6 +126,9 @@ func NewMiddleware(ctx context.Context, cfg Config) (*Middleware, error) {
 	}
 	if cfg.CacheTTL == 0 {
 		cfg.CacheTTL = 30 * time.Second
+	}
+	if cfg.SessionCookieMaxAgeSeconds == 0 {
+		cfg.SessionCookieMaxAgeSeconds = defaultSessionCookieMaxAgeSeconds
 	}
 
 	// OIDC provider discovery
@@ -605,7 +613,7 @@ func (m *Middleware) setSessionCookie(w http.ResponseWriter, token string) error
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   3600, // 1 hour – matches typical Keycloak access token lifetime
+		MaxAge:   m.cfg.SessionCookieMaxAgeSeconds,
 	})
 	return nil
 }
