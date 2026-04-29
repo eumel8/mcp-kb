@@ -54,9 +54,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "issuerURL":       { "type": "string" },
-        "externalBaseURL": { "type": "string" },
-        "introspectURL":   { "type": "string" }
+        "issuerURL":                    { "type": "string" },
+        "externalBaseURL":              { "type": "string" },
+        "introspectURL":                { "type": "string" },
+        "sessionCookieMaxAgeSeconds": { "type": "integer", "minimum": 1 }
       }
     },
     "database": {

@@ -105,6 +105,10 @@ spec:
             - name: OIDC_INTROSPECT_URL
               # Optional: validates tokens on every request (30 s cache applied).
               value: "https://keycloak.example.com/auth/realms/myrealm/protocol/openid-connect/token/introspect"
+            - name: OIDC_SESSION_COOKIE_MAX_AGE_SECONDS
+              # Browser session cookie lifetime. Keep this aligned with the
+              # Keycloak access token lifespan when introspection is enabled.
+              value: "3600"
             - name: OIDC_CLIENT_ID
               valueFrom:
                 secretKeyRef:

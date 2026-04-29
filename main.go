@@ -19,7 +19,8 @@
 //
 // Required variables: OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET,
 // OIDC_EXTERNAL_BASE_URL.
-// Optional: OIDC_INTROSPECT_URL, OIDC_COOKIE_ENCRYPTION_KEY (32-byte hex).
+// Optional: OIDC_INTROSPECT_URL, OIDC_COOKIE_ENCRYPTION_KEY (32-byte hex),
+// OIDC_SESSION_COOKIE_MAX_AGE_SECONDS.
 //
 // # Database
 //
@@ -40,6 +41,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/eumel8/mcp-kb/internal/auth"
 	"github.com/eumel8/mcp-kb/internal/db"
@@ -105,12 +107,13 @@ func run() error {
 
 		if cfg.OIDCIssuerURL != "" {
 			authMiddleware, err := auth.NewMiddleware(context.Background(), auth.Config{
-				IssuerURL:           cfg.OIDCIssuerURL,
-				ClientID:            cfg.OIDCClientID,
-				ClientSecret:        cfg.OIDCClientSecret,
-				ExternalBaseURL:     cfg.OIDCExternalBaseURL,
-				CookieEncryptionKey: cfg.OIDCCookieEncryptionKey,
-				IntrospectURL:       cfg.OIDCIntrospectURL,
+				IssuerURL:                  cfg.OIDCIssuerURL,
+				ClientID:                   cfg.OIDCClientID,
+				ClientSecret:               cfg.OIDCClientSecret,
+				ExternalBaseURL:            cfg.OIDCExternalBaseURL,
+				CookieEncryptionKey:        cfg.OIDCCookieEncryptionKey,
+				IntrospectURL:              cfg.OIDCIntrospectURL,
+				SessionCookieMaxAgeSeconds: cfg.OIDCSessionCookieMaxAgeSeconds,
 			})
 			if err != nil {
 				return fmt.Errorf("create auth middleware: %w", err)
@@ -153,12 +156,13 @@ type serverConfig struct {
 	Port        string
 
 	// OIDC / Keycloak
-	OIDCIssuerURL           string
-	OIDCClientID            string
-	OIDCClientSecret        string
-	OIDCExternalBaseURL     string
-	OIDCIntrospectURL       string
-	OIDCCookieEncryptionKey []byte
+	OIDCIssuerURL                  string
+	OIDCClientID                   string
+	OIDCClientSecret               string
+	OIDCExternalBaseURL            string
+	OIDCIntrospectURL              string
+	OIDCCookieEncryptionKey        []byte
+	OIDCSessionCookieMaxAgeSeconds int
 }
 
 func configFromEnv() (serverConfig, error) {
@@ -185,17 +189,26 @@ func configFromEnv() (serverConfig, error) {
 		}
 	}
 
+	sessionCookieMaxAgeSeconds, err := getEnvIntOrDefault("OIDC_SESSION_COOKIE_MAX_AGE_SECONDS", 3600)
+	if err != nil {
+		return serverConfig{}, err
+	}
+	if sessionCookieMaxAgeSeconds <= 0 {
+		return serverConfig{}, fmt.Errorf("OIDC_SESSION_COOKIE_MAX_AGE_SECONDS must be greater than 0")
+	}
+
 	return serverConfig{
 		DatabaseURL: dbURL,
 		Transport:   getEnvOrDefault("MCP_TRANSPORT", "sse"),
 		Port:        getEnvOrDefault("MCP_PORT", "8080"),
 
-		OIDCIssuerURL:           os.Getenv("OIDC_ISSUER_URL"),
-		OIDCClientID:            os.Getenv("OIDC_CLIENT_ID"),
-		OIDCClientSecret:        os.Getenv("OIDC_CLIENT_SECRET"),
-		OIDCExternalBaseURL:     os.Getenv("OIDC_EXTERNAL_BASE_URL"),
-		OIDCIntrospectURL:       os.Getenv("OIDC_INTROSPECT_URL"),
-		OIDCCookieEncryptionKey: cookieKey,
+		OIDCIssuerURL:                  os.Getenv("OIDC_ISSUER_URL"),
+		OIDCClientID:                   os.Getenv("OIDC_CLIENT_ID"),
+		OIDCClientSecret:               os.Getenv("OIDC_CLIENT_SECRET"),
+		OIDCExternalBaseURL:            os.Getenv("OIDC_EXTERNAL_BASE_URL"),
+		OIDCIntrospectURL:              os.Getenv("OIDC_INTROSPECT_URL"),
+		OIDCCookieEncryptionKey:        cookieKey,
+		OIDCSessionCookieMaxAgeSeconds: sessionCookieMaxAgeSeconds,
 	}, nil
 }
 
@@ -204,4 +217,16 @@ func getEnvOrDefault(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func getEnvIntOrDefault(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	parsed, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", key, err)
+	}
+	return parsed, nil
 }
