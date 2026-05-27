@@ -66,6 +66,14 @@ type SearchFilters struct {
 	Environment       string
 	AffectedComponent string
 	Tags              []string
+	CASMTicketID      string
+	AlertName         string
+	ReportedBy        string
+	ResolvedBy        string
+	OccurredAtAfter   *time.Time
+	OccurredAtBefore  *time.Time
+	ResolvedAtAfter   *time.Time
+	ResolvedAtBefore  *time.Time
 }
 
 // StoreIncident inserts (or upserts on casm_ticket_id) an incident.
@@ -146,6 +154,46 @@ func SearchIncidents(ctx context.Context, pool *pgxpool.Pool, query string, topK
 	if len(filters.Tags) > 0 {
 		conditions = append(conditions, fmt.Sprintf("tags && $%d", argN))
 		args = append(args, filters.Tags)
+		argN++
+	}
+	if filters.CASMTicketID != "" {
+		conditions = append(conditions, fmt.Sprintf("casm_ticket_id = $%d", argN))
+		args = append(args, filters.CASMTicketID)
+		argN++
+	}
+	if filters.AlertName != "" {
+		conditions = append(conditions, fmt.Sprintf("alert_name ILIKE $%d", argN))
+		args = append(args, "%"+filters.AlertName+"%")
+		argN++
+	}
+	if filters.ReportedBy != "" {
+		conditions = append(conditions, fmt.Sprintf("reported_by ILIKE $%d", argN))
+		args = append(args, "%"+filters.ReportedBy+"%")
+		argN++
+	}
+	if filters.ResolvedBy != "" {
+		conditions = append(conditions, fmt.Sprintf("resolved_by ILIKE $%d", argN))
+		args = append(args, "%"+filters.ResolvedBy+"%")
+		argN++
+	}
+	if filters.OccurredAtAfter != nil {
+		conditions = append(conditions, fmt.Sprintf("occurred_at >= $%d", argN))
+		args = append(args, *filters.OccurredAtAfter)
+		argN++
+	}
+	if filters.OccurredAtBefore != nil {
+		conditions = append(conditions, fmt.Sprintf("occurred_at <= $%d", argN))
+		args = append(args, *filters.OccurredAtBefore)
+		argN++
+	}
+	if filters.ResolvedAtAfter != nil {
+		conditions = append(conditions, fmt.Sprintf("resolved_at >= $%d", argN))
+		args = append(args, *filters.ResolvedAtAfter)
+		argN++
+	}
+	if filters.ResolvedAtBefore != nil {
+		conditions = append(conditions, fmt.Sprintf("resolved_at <= $%d", argN))
+		args = append(args, *filters.ResolvedAtBefore)
 		argN++
 	}
 

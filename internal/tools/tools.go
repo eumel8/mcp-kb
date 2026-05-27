@@ -62,13 +62,26 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool) {
 			mcp.Description("Optional filter: partial match against component name (e.g. 'ingress-nginx', 'ship-lab-1').")),
 		mcp.WithString("tags",
 			mcp.Description("Optional comma-separated tags to filter by (e.g. 'oom,crashloopbackoff').")),
+		mcp.WithString("casm_ticket_id",
+			mcp.Description("Optional filter: exact match on CASM trouble ticket ID.")),
+		mcp.WithString("alert_name",
+			mcp.Description("Optional filter: partial match against Prometheus/Alertmanager alert name.")),
+		mcp.WithString("reported_by",
+			mcp.Description("Optional filter: partial match against the person or system that reported the incident.")),
+		mcp.WithString("resolved_by",
+			mcp.Description("Optional filter: partial match against the person or team that resolved the incident.")),
+		mcp.WithString("occurred_at_after",
+			mcp.Description("Optional filter: RFC3339 timestamp lower bound for occurred_at (inclusive).")),
+		mcp.WithString("occurred_at_before",
+			mcp.Description("Optional filter: RFC3339 timestamp upper bound for occurred_at (inclusive).")),
+		mcp.WithString("resolved_at_after",
+			mcp.Description("Optional filter: RFC3339 timestamp lower bound for resolved_at (inclusive).")),
+		mcp.WithString("resolved_at_before",
+			mcp.Description("Optional filter: RFC3339 timestamp upper bound for resolved_at (inclusive).")),
 	)
 
 	s.AddTool(tool, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		query := mcp.ParseString(req, "query", "")
-		if query == "" {
-			return mcp.NewToolResultError("query is required"), nil
-		}
 
 		topK := int(mcp.ParseFloat64(req, "top_k", 5))
 		if topK > 20 {
@@ -79,11 +92,56 @@ func registerSearchIncidents(s *server.MCPServer, pool *pgxpool.Pool) {
 			Severity:          mcp.ParseString(req, "severity", ""),
 			Environment:       mcp.ParseString(req, "environment", ""),
 			AffectedComponent: mcp.ParseString(req, "affected_component", ""),
+			CASMTicketID:      mcp.ParseString(req, "casm_ticket_id", ""),
+			AlertName:         mcp.ParseString(req, "alert_name", ""),
+			ReportedBy:        mcp.ParseString(req, "reported_by", ""),
+			ResolvedBy:        mcp.ParseString(req, "resolved_by", ""),
 		}
 		if tagStr := mcp.ParseString(req, "tags", ""); tagStr != "" {
 			for _, t := range strings.Split(tagStr, ",") {
 				filters.Tags = append(filters.Tags, strings.TrimSpace(t))
 			}
+		}
+
+		// Parse timestamp filters
+		if ts := mcp.ParseString(req, "occurred_at_after", ""); ts != "" {
+			t, err := time.Parse(time.RFC3339, ts)
+			if err != nil {
+				return mcp.NewToolResultError("occurred_at_after must be RFC3339: " + err.Error()), nil
+			}
+			filters.OccurredAtAfter = &t
+		}
+		if ts := mcp.ParseString(req, "occurred_at_before", ""); ts != "" {
+			t, err := time.Parse(time.RFC3339, ts)
+			if err != nil {
+				return mcp.NewToolResultError("occurred_at_before must be RFC3339: " + err.Error()), nil
+			}
+			filters.OccurredAtBefore = &t
+		}
+		if ts := mcp.ParseString(req, "resolved_at_after", ""); ts != "" {
+			t, err := time.Parse(time.RFC3339, ts)
+			if err != nil {
+				return mcp.NewToolResultError("resolved_at_after must be RFC3339: " + err.Error()), nil
+			}
+			filters.ResolvedAtAfter = &t
+		}
+		if ts := mcp.ParseString(req, "resolved_at_before", ""); ts != "" {
+			t, err := time.Parse(time.RFC3339, ts)
+			if err != nil {
+				return mcp.NewToolResultError("resolved_at_before must be RFC3339: " + err.Error()), nil
+			}
+			filters.ResolvedAtBefore = &t
+		}
+
+		// Allow empty query when at least one filter is set
+		hasFilter := filters.Severity != "" || filters.Environment != "" ||
+			filters.AffectedComponent != "" || len(filters.Tags) > 0 ||
+			filters.CASMTicketID != "" || filters.AlertName != "" ||
+			filters.ReportedBy != "" || filters.ResolvedBy != "" ||
+			filters.OccurredAtAfter != nil || filters.OccurredAtBefore != nil ||
+			filters.ResolvedAtAfter != nil || filters.ResolvedAtBefore != nil
+		if query == "" && !hasFilter {
+			return mcp.NewToolResultError("query is required when no filters are provided"), nil
 		}
 
 		results, err := db.SearchIncidents(ctx, pool, query, topK, filters)

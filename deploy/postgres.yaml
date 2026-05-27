@@ -1,110 +1,38 @@
-# PostgreSQL with pgvector – PersistentVolumeClaim
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-data
-  namespace: mcp-kb
-  labels:
-    app.kubernetes.io/name: postgres
-    app.kubernetes.io/part-of: mcp-kb
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  # Set storageClassName to match your cluster's storage class.
-  # Leave unset to use the default storage class.
-  # storageClassName: standard
----
-# ConfigMap: PostgreSQL init script applies the schema on first boot.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: postgres-init
-  namespace: mcp-kb
-  labels:
-    app.kubernetes.io/name: postgres
-    app.kubernetes.io/part-of: mcp-kb
-data:
-  # The schema.sql is mounted here. The official postgres image runs all
-  # *.sql files in /docker-entrypoint-initdb.d/ automatically on first start.
-  schema.sql: |
-    CREATE EXTENSION IF NOT EXISTS vector;
-    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+# PostgreSQL StatefulSet for mcp-kb
+#
+# Schema initialisation is handled by the db-migrate Job (migrate-job.yaml),
+# NOT by docker-entrypoint-initdb.d.  Apply in this order:
+#
+#   kubectl apply -f deploy/postgres.yaml
+#   kubectl apply -f deploy/migrate-job.yaml
+#   kubectl -n observability-system wait --for=condition=complete \
+#       job/db-migrate --timeout=120s
+#   kubectl -n observability-system logs job/db-migrate
 
-    CREATE TABLE IF NOT EXISTS incidents (
-        id                  UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
-        title               TEXT        NOT NULL,
-        description         TEXT        NOT NULL,
-        affected_component  TEXT        NOT NULL,
-        severity            TEXT        NOT NULL
-                                CHECK (severity IN ('Critical','Major','Minor','Uncritical')),
-        environment         TEXT        NOT NULL DEFAULT 'prod',
-        root_cause          TEXT,
-        resolution          TEXT        NOT NULL,
-        runbook_url         TEXT,
-        tags                TEXT[]      NOT NULL DEFAULT '{}',
-        casm_ticket_id      TEXT,
-        alert_name          TEXT,
-        reported_by         TEXT,
-        resolved_by         TEXT,
-        occurred_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        resolved_at         TIMESTAMPTZ,
-        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS incident_embeddings (
-        incident_id         UUID        NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
-        model               TEXT        NOT NULL DEFAULT 'text-embedding-3-small',
-        embedding           vector(1536) NOT NULL,
-        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (incident_id, model)
-    );
-
-    CREATE INDEX IF NOT EXISTS incident_embeddings_ivfflat_idx
-        ON incident_embeddings
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100);
-
-    CREATE OR REPLACE FUNCTION set_updated_at()
-    RETURNS TRIGGER LANGUAGE plpgsql AS $$
-    BEGIN
-        NEW.updated_at = NOW();
-        RETURN NEW;
-    END;
-    $$;
-
-    DROP TRIGGER IF EXISTS incidents_updated_at ON incidents;
-    CREATE TRIGGER incidents_updated_at
-        BEFORE UPDATE ON incidents
-        FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 ---
 # Secret: PostgreSQL credentials
-# In production, manage this via Sealed Secrets, External Secrets Operator,
-# or Vault – do NOT commit plaintext secrets.
+# In production manage via Sealed Secrets / External Secrets Operator / Vault.
+# Do NOT commit plaintext secrets.
 apiVersion: v1
 kind: Secret
 metadata:
   name: postgres-credentials
-  namespace: mcp-kb
+  namespace: observability-system
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: mcp-kb
 type: Opaque
 stringData:
-  # Override these values with your actual credentials.
-  POSTGRES_USER: mcpkb
+  POSTGRES_USER:     mcpkb
   POSTGRES_PASSWORD: CHANGE_ME
-  POSTGRES_DB: mcpkb
+  POSTGRES_DB:       mcpkb
 ---
-# StatefulSet: PostgreSQL with pgvector
+# StatefulSet: PostgreSQL 16
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: postgres
-  namespace: mcp-kb
+  namespace: observability-system
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: mcp-kb
@@ -128,7 +56,10 @@ spec:
       initContainers:
         - name: fix-permissions
           image: busybox:1.36
-          command: ["sh", "-c", "chown -R 999:999 /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data"]
+          command:
+            - sh
+            - -c
+            - chown -R 999:999 /var/lib/postgresql/data && chmod 700 /var/lib/postgresql/data
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -137,8 +68,7 @@ spec:
               subPath: pgdata
       containers:
         - name: postgres
-          # pgvector is pre-installed in the official pgvector image.
-          image: pgvector/pgvector:pg16
+          image: postgres:16-alpine
           ports:
             - name: postgres
               containerPort: 5432
@@ -167,39 +97,40 @@ spec:
             - name: data
               mountPath: /var/lib/postgresql/data
               subPath: pgdata
-            - name: init-scripts
-              mountPath: /docker-entrypoint-initdb.d
-      volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: postgres-data
-        - name: init-scripts
-          configMap:
-            name: postgres-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # storageClassName: standard   # uncomment to pin a storage class
 ---
-# Service: headless for StatefulSet + ClusterIP for app access
+# Service: headless – required for StatefulSet DNS
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres
-  namespace: mcp-kb
+  namespace: observability-system
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: mcp-kb
 spec:
   selector:
     app.kubernetes.io/name: postgres
+  clusterIP: None
   ports:
     - name: postgres
       port: 5432
       targetPort: postgres
-  clusterIP: None   # headless – StatefulSet DNS: postgres.mcp-kb.svc.cluster.local
 ---
+# Service: ClusterIP – used by mcp-kb and the migrate Job
 apiVersion: v1
 kind: Service
 metadata:
   name: postgres-rw
-  namespace: mcp-kb
+  namespace: observability-system
   labels:
     app.kubernetes.io/name: postgres
     app.kubernetes.io/part-of: mcp-kb
