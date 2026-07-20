@@ -48,6 +48,7 @@ type Incident struct {
 	AlertName         string     `json:"alert_name,omitempty"`
 	ReportedBy        string     `json:"reported_by,omitempty"`
 	ResolvedBy        string     `json:"resolved_by,omitempty"`
+	GitCommit         string     `json:"git_commit,omitempty"`
 	OccurredAt        *time.Time `json:"occurred_at,omitempty"`
 	ResolvedAt        *time.Time `json:"resolved_at,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
@@ -84,9 +85,9 @@ func StoreIncident(ctx context.Context, pool *pgxpool.Pool, inc Incident) (strin
 		INSERT INTO incidents (
 			title, description, affected_component, severity, environment,
 			root_cause, resolution, runbook_url, tags, casm_ticket_id,
-			alert_name, reported_by, resolved_by, occurred_at, resolved_at
+			alert_name, reported_by, resolved_by, git_commit, occurred_at, resolved_at
 		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16
 		)
 		ON CONFLICT (casm_ticket_id) WHERE casm_ticket_id IS NOT NULL
 		DO UPDATE SET
@@ -102,13 +103,14 @@ func StoreIncident(ctx context.Context, pool *pgxpool.Pool, inc Incident) (strin
 			alert_name         = EXCLUDED.alert_name,
 			reported_by        = EXCLUDED.reported_by,
 			resolved_by        = EXCLUDED.resolved_by,
+			git_commit         = EXCLUDED.git_commit,
 			occurred_at        = EXCLUDED.occurred_at,
 			resolved_at        = EXCLUDED.resolved_at
 		RETURNING id`,
 		inc.Title, inc.Description, inc.AffectedComponent, inc.Severity,
 		inc.Environment, nullStr(inc.RootCause), inc.Resolution, nullStr(inc.RunbookURL),
 		inc.Tags, nullStr(inc.CASMTicketID), nullStr(inc.AlertName),
-		nullStr(inc.ReportedBy), nullStr(inc.ResolvedBy),
+		nullStr(inc.ReportedBy), nullStr(inc.ResolvedBy), nullStr(inc.GitCommit),
 		inc.OccurredAt, inc.ResolvedAt,
 	).Scan(&id)
 	if err != nil {
@@ -226,6 +228,7 @@ func SearchIncidents(ctx context.Context, pool *pgxpool.Pool, query string, topK
 		       COALESCE(root_cause,''), resolution, COALESCE(runbook_url,''), tags,
 		       COALESCE(casm_ticket_id,''), COALESCE(alert_name,''),
 		       COALESCE(reported_by,''), COALESCE(resolved_by,''),
+		       COALESCE(git_commit,''),
 		       occurred_at, resolved_at, created_at, updated_at
 		       %s
 		FROM incidents
@@ -247,6 +250,7 @@ func SearchIncidents(ctx context.Context, pool *pgxpool.Pool, query string, topK
 			&r.ID, &r.Title, &r.Description, &r.AffectedComponent, &r.Severity,
 			&r.Environment, &r.RootCause, &r.Resolution, &r.RunbookURL, &r.Tags,
 			&r.CASMTicketID, &r.AlertName, &r.ReportedBy, &r.ResolvedBy,
+			&r.GitCommit,
 			&r.OccurredAt, &r.ResolvedAt, &r.CreatedAt, &r.UpdatedAt,
 			&r.Rank,
 		); err != nil {
@@ -329,12 +333,14 @@ func GetIncident(ctx context.Context, pool *pgxpool.Pool, id string) (*Incident,
 		       COALESCE(root_cause,''), resolution, COALESCE(runbook_url,''), tags,
 		       COALESCE(casm_ticket_id,''), COALESCE(alert_name,''),
 		       COALESCE(reported_by,''), COALESCE(resolved_by,''),
+		       COALESCE(git_commit,''),
 		       occurred_at, resolved_at, created_at, updated_at
 		FROM incidents WHERE id = $1`, id,
 	).Scan(
 		&inc.ID, &inc.Title, &inc.Description, &inc.AffectedComponent, &inc.Severity,
 		&inc.Environment, &inc.RootCause, &inc.Resolution, &inc.RunbookURL, &inc.Tags,
 		&inc.CASMTicketID, &inc.AlertName, &inc.ReportedBy, &inc.ResolvedBy,
+		&inc.GitCommit,
 		&inc.OccurredAt, &inc.ResolvedAt, &inc.CreatedAt, &inc.UpdatedAt,
 	)
 	if err != nil {
