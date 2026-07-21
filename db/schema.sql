@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS incidents (
 
     reported_by         TEXT,
     resolved_by         TEXT,
+    git_commit          TEXT,
     occurred_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resolved_at         TIMESTAMPTZ,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
